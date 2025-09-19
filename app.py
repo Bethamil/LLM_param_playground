@@ -24,6 +24,7 @@ import config
 import openai
 import os
 import time
+import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
 
 def update_model_choices(provider):
@@ -335,6 +336,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Markdown display for response metadata (model, time, tokens)
     metadata = gr.Markdown(label="Response Metadata")
 
+    # Messages Accordion Section
+    with gr.Accordion("Full Message Array", open=False):
+        messages_output = gr.JSON(label="Conversation Messages", value=[])
+
     # Function for generating responses with error handling
     def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
         """
@@ -357,7 +362,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             stream (bool): Whether to use streaming
 
         Yields:
-            tuple: (gr.update for response, gr.update for reasoning, gr.update for error, metadata_str)
+            tuple: (gr.update for reasoning, gr.update for response, gr.update for error, metadata_str, api_messages)
         """
         # Initialize variables
         full_response = ""
@@ -389,7 +394,8 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                     yield (gr.update(value=reasoning_value),
                            gr.update(value=partial),
                            gr.update(value="", visible=False),
-                           "")
+                           "",
+                           messages)
                 full_response = partial
                 reasoning = last_reasoning
                 usage = last_usage
@@ -416,6 +422,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         end_time = time.time()
         response_time = end_time - start_time
 
+        # Add assistant response to messages array if successful
+        if full_response and not error_message:
+            messages.append({"role": "assistant", "content": full_response})
+
         # Format metadata for display
         metadata = format_metadata(model, provider, response_time, usage, error_message)
 
@@ -424,20 +434,22 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             yield (gr.update(value="No reasoning tokens included"),
                    gr.update(value=""),
                    gr.update(value=error_message, visible=True),
-                   metadata)
+                   metadata,
+                   messages)
         else:
             reasoning_value = reasoning if reasoning else "No reasoning tokens included"
             yield (gr.update(value=reasoning_value),
                    gr.update(value=full_response),
                    gr.update(value="", visible=False),
-                   metadata)
+                   metadata,
+                   messages)
 
     # Event handler for the generate button
     # Calls generate_response function with all input values and updates output components
     generate_btn.click(
         fn=generate_response,
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming],
-        outputs=[reasoning_output, response_output, error_output, metadata]
+        outputs=[reasoning_output, response_output, error_output, metadata, messages_output]
     )
 
 # Main execution block

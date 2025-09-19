@@ -30,7 +30,7 @@ OPENROUTER_MODELS = [
 CUSTOM_MODELS = []  # Empty for custom, as model can be specified manually
 
 # Default parameters
-DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TEMPERATURE = 1
 DEFAULT_MAX_TOKENS = 1000
 DEFAULT_TOP_P = 1.0
 DEFAULT_FREQUENCY_PENALTY = 0.0

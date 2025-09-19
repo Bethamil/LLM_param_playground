@@ -141,7 +141,7 @@ def prepare_messages(system, prompt):
 
 def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
     """
-    Handle streaming API response and yield partial responses with usage.
+    Handle streaming API response and yield partial responses with usage and reasoning.
 
     Args:
         client (OpenAI): The OpenAI client instance.
@@ -154,13 +154,13 @@ def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val,
         pres_pen (float): Presence penalty.
 
     Yields:
-        tuple: (partial_response, usage)
+        tuple: (partial_response, usage, reasoning)
     """
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temp,
-        max_tokens=max_tok,
+        max_completion_tokens=max_tok,
         top_p=top_p_val,
         frequency_penalty=freq_pen,
         presence_penalty=pres_pen,
@@ -168,18 +168,22 @@ def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val,
     )
 
     full_response = ""
+    full_reasoning = ""
     usage = None
     for chunk in response:
         if chunk.choices[0].delta.content:
             full_response += chunk.choices[0].delta.content
-            yield full_response, usage
+            yield full_response, usage, full_reasoning
+        if hasattr(chunk.choices[0].delta, 'reasoning') and chunk.choices[0].delta.reasoning:
+            full_reasoning += chunk.choices[0].delta.reasoning
+            yield full_response, usage, full_reasoning
         if chunk.usage:
             usage = chunk.usage
-            yield full_response, usage
+            yield full_response, usage, full_reasoning
 
 def handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
     """
-    Handle non-streaming API response and extract the response and usage.
+    Handle non-streaming API response and extract the response, usage, and reasoning.
 
     Args:
         client (OpenAI): The OpenAI client instance.
@@ -192,13 +196,13 @@ def handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_
         pres_pen (float): Presence penalty.
 
     Returns:
-        tuple: (full_response, usage)
+        tuple: (full_response, usage, reasoning)
     """
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temp,
-        max_tokens=max_tok,
+        max_completion_tokens=max_tok,
         top_p=top_p_val,
         frequency_penalty=freq_pen,
         presence_penalty=pres_pen,
@@ -206,7 +210,8 @@ def handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_
     )
     full_response = response.choices[0].message.content
     usage = response.usage
-    return full_response, usage
+    reasoning = getattr(response.choices[0].message, 'reasoning', None) or ""
+    return full_response, usage, reasoning
 
 def format_metadata(model, provider, response_time, usage, error_message):
     """
@@ -318,6 +323,8 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
     # Output Section
     gr.Markdown("## Output Section")
+    # Textbox for displaying reasoning tokens when available
+    reasoning_output = gr.Textbox(label="Model Reasoning", lines=5, visible=True)
     # Textbox for displaying successful model responses
     response_output = gr.Textbox(label="Model Response", lines=10)
     # Textbox for displaying errors (hidden by default)
@@ -350,10 +357,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             stream (bool): Whether to use streaming
 
         Yields:
-            tuple: (gr.update for response, gr.update for error, metadata_str)
+            tuple: (gr.update for response, gr.update for reasoning, gr.update for error, metadata_str)
         """
         # Initialize variables
         full_response = ""
+        reasoning = ""
         usage = None
         error_message = ""
 
@@ -375,13 +383,19 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             # Make API call based on streaming preference
             if stream:
                 last_usage = None
-                for partial, last_usage in handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
-                    yield gr.update(value=partial), gr.update(value="", visible=False), ""
+                last_reasoning = ""
+                for partial, last_usage, last_reasoning in handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
+                    reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
+                    yield (gr.update(value=reasoning_value),
+                           gr.update(value=partial),
+                           gr.update(value="", visible=False),
+                           "")
                 full_response = partial
+                reasoning = last_reasoning
                 usage = last_usage
             else:
                 # Handle non-streaming response
-                full_response, usage = handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen)
+                full_response, usage, reasoning = handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen)
 
         except ValueError as e:
             error_message = str(e)
@@ -407,16 +421,23 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
         # Yield with appropriate visibility for error output
         if error_message:
-            yield gr.update(value=""), gr.update(value=error_message, visible=True), metadata
+            yield (gr.update(value="No reasoning tokens included"),
+                   gr.update(value=""),
+                   gr.update(value=error_message, visible=True),
+                   metadata)
         else:
-            yield gr.update(value=full_response), gr.update(value="", visible=False), metadata
+            reasoning_value = reasoning if reasoning else "No reasoning tokens included"
+            yield (gr.update(value=reasoning_value),
+                   gr.update(value=full_response),
+                   gr.update(value="", visible=False),
+                   metadata)
 
     # Event handler for the generate button
     # Calls generate_response function with all input values and updates output components
     generate_btn.click(
         fn=generate_response,
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming],
-        outputs=[response_output, error_output, metadata]
+        outputs=[reasoning_output, response_output, error_output, metadata]
     )
 
 # Main execution block

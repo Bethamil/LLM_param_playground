@@ -361,11 +361,6 @@ def auto_load_rag_database(rag_enabled, provider, embedding_provider=None):
     else:
         return "📂 No database found - click Initialize to create one"
 
-def create_2d_visualization():
-    """Create 2D vector visualization."""
-    fig = rag_manager.create_vector_visualization(dimensions=2)
-    return fig
-
 def create_3d_visualization():
     """Create 3D vector visualization."""
     fig = rag_manager.create_vector_visualization(dimensions=3)
@@ -818,13 +813,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
 
         # Vector Visualization
         gr.Markdown("### Vector Visualization")
-        with gr.Row():
-            viz_2d_btn = gr.Button("Generate 2D Plot")
-            viz_3d_btn = gr.Button("Generate 3D Plot")
-
-        with gr.Row():
-            viz_2d_plot = gr.Plot(label="2D Vector Visualization")
-            viz_3d_plot = gr.Plot(label="3D Vector Visualization")
+        viz_3d_btn = gr.Button("Generate 3D Plot")
+        viz_3d_plot = gr.Plot(label="3D Vector Visualization")
 
     # Judge Configuration Section
     gr.Markdown("## LLM Judge Configuration")
@@ -1230,11 +1220,6 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         fn=initialize_or_update_rag_database,
         inputs=[knowledge_base_path, file_pattern, provider_radio, custom_api_key, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
         outputs=[rag_status, doc_count]
-    )
-
-    viz_2d_btn.click(
-        fn=create_2d_visualization,
-        outputs=[viz_2d_plot]
     )
 
     viz_3d_btn.click(

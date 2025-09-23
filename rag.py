@@ -74,7 +74,6 @@ class RAGManager:
                 )
             elif provider == "Custom":
                 # Use OpenAI-compatible embedding endpoint with custom base URL
-                print(f"Setting custom embeddings with base_url: {base_url}, model: {model}")
                 self.embeddings = OpenAIEmbeddings(
                     openai_api_key=api_key,
                     model=model,
@@ -82,15 +81,12 @@ class RAGManager:
                     check_embedding_ctx_length=False  # Disable context length checking for custom endpoints
                 )
             else:
-                print(f"Unknown provider: {provider}")
                 return False
 
             # Update instance variables
             self.embedding_provider = provider
             self.embedding_model = model
             self.embedding_base_url = base_url
-
-            print(f"Successfully set embeddings: provider={provider}, model={model}")
             return True
         except Exception as e:
             print(f"Error setting embeddings: {e}")

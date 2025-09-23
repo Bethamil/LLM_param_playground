@@ -142,9 +142,9 @@ def prepare_messages(system, prompt):
         {"role": "user", "content": prompt}
     ]
 
-def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
+def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream=False):
     """
-    Handle streaming API response and yield partial responses with usage and reasoning.
+    Handle API response with unified streaming and non-streaming logic.
 
     Args:
         client (OpenAI): The OpenAI client instance.
@@ -155,9 +155,12 @@ def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val,
         top_p_val (float): Top-p parameter.
         freq_pen (float): Frequency penalty.
         pres_pen (float): Presence penalty.
+        stream (bool): Whether to use streaming mode.
 
     Yields:
-        tuple: (partial_response, usage, reasoning)
+        tuple: (response_content, usage, reasoning)
+        - For streaming: yields partial results as they arrive
+        - For non-streaming: yields final result once
     """
     response = client.chat.completions.create(
         model=model,
@@ -167,54 +170,30 @@ def handle_streaming_response(client, model, messages, temp, max_tok, top_p_val,
         top_p=top_p_val,
         frequency_penalty=freq_pen,
         presence_penalty=pres_pen,
-        stream=True
+        stream=stream
     )
 
-    full_response = ""
-    full_reasoning = ""
-    usage = None
-    for chunk in response:
-        if chunk.choices[0].delta.content:
-            full_response += chunk.choices[0].delta.content
-            yield full_response, usage, full_reasoning
-        if hasattr(chunk.choices[0].delta, 'reasoning') and chunk.choices[0].delta.reasoning:
-            full_reasoning += chunk.choices[0].delta.reasoning
-            yield full_response, usage, full_reasoning
-        if chunk.usage:
-            usage = chunk.usage
-            yield full_response, usage, full_reasoning
-
-def handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
-    """
-    Handle non-streaming API response and extract the response, usage, and reasoning.
-
-    Args:
-        client (OpenAI): The OpenAI client instance.
-        model (str): The model name.
-        messages (list): List of messages.
-        temp (float): Temperature parameter.
-        max_tok (int): Max tokens.
-        top_p_val (float): Top-p parameter.
-        freq_pen (float): Frequency penalty.
-        pres_pen (float): Presence penalty.
-
-    Returns:
-        tuple: (full_response, usage, reasoning)
-    """
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temp,
-        max_completion_tokens=max_tok,
-        top_p=top_p_val,
-        frequency_penalty=freq_pen,
-        presence_penalty=pres_pen,
-        stream=False
-    )
-    full_response = response.choices[0].message.content
-    usage = response.usage
-    reasoning = getattr(response.choices[0].message, 'reasoning', None) or ""
-    return full_response, usage, reasoning
+    if stream:
+        # Streaming mode: yield partial results as they arrive
+        full_response = ""
+        full_reasoning = ""
+        usage = None
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                full_response += chunk.choices[0].delta.content
+                yield full_response, usage, full_reasoning
+            if hasattr(chunk.choices[0].delta, 'reasoning') and chunk.choices[0].delta.reasoning:
+                full_reasoning += chunk.choices[0].delta.reasoning
+                yield full_response, usage, full_reasoning
+            if chunk.usage:
+                usage = chunk.usage
+                yield full_response, usage, full_reasoning
+    else:
+        # Non-streaming mode: yield final result once
+        full_response = response.choices[0].message.content
+        usage = response.usage
+        reasoning = getattr(response.choices[0].message, 'reasoning', None) or ""
+        yield full_response, usage, reasoning
 
 def format_metadata(model, provider, response_time, usage, error_message):
     """
@@ -630,24 +609,31 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         start_time = time.time()
 
         try:
-            # Make API call based on streaming preference
-            if stream:
-                last_usage = None
-                last_reasoning = ""
-                for partial, last_usage, last_reasoning in handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
+            # Make API call using unified response handler
+            last_usage = None
+            last_reasoning = ""
+            full_response = ""
+
+            for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
+                full_response = response_content
+                if response_usage:
+                    last_usage = response_usage
+                if response_reasoning:
+                    last_reasoning = response_reasoning
+
+                # For streaming, yield each partial result
+                if stream:
                     reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
                     yield (gr.update(value=reasoning_value),
                            gr.update(value=retrieved_context, visible=use_rag),
-                           gr.update(value=partial),
+                           gr.update(value=full_response),
                            gr.update(value="", visible=False),
                            "",
                            messages)
-                full_response = partial
-                reasoning = last_reasoning
-                usage = last_usage
-            else:
-                # Handle non-streaming response
-                full_response, usage, reasoning = handle_non_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen)
+
+            # Set final values for downstream processing
+            usage = last_usage
+            reasoning = last_reasoning
 
         except ValueError as e:
             error_message = str(e)

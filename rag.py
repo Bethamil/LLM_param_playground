@@ -187,8 +187,9 @@ class RAGManager:
                         self.vectorstore = None
 
                     # Use a new database name with timestamp to avoid conflicts
+                    # Always base it on the original config name to avoid multiple timestamps
                     timestamp = int(time.time())
-                    new_db_name = f"{self.db_name}_{timestamp}"
+                    new_db_name = f"{config.DEFAULT_VECTOR_DB_NAME}_{timestamp}"
 
                     # Update the database name for this instance
                     old_db_name = self.db_name

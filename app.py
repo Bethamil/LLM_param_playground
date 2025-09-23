@@ -362,7 +362,8 @@ def auto_load_rag_database(rag_enabled, provider, embedding_provider=None, embed
                     stats = rag_manager.get_database_stats()
                     if stats.get("status") == "Active":
                         doc_count = stats.get('document_count', 'Unknown')
-                        return f"✅ Database loaded: {doc_count} documents"
+                        embedding_dims = stats.get('embedding_dimensions', 'Unknown')
+                        return f"✅ Database loaded\n📄 Documents: {doc_count}\n📐 Dimensions: {embedding_dims}"
                     else:
                         return f"⚠️ Database loaded but inactive: {stats.get('status', 'Unknown')}"
                 else:
@@ -426,8 +427,7 @@ def initialize_or_update_rag_database(knowledge_base_path, file_pattern, provide
             try:
                 stats = rag_manager.get_database_stats()
                 if stats and stats.get("status") == "Active":
-                    vector_count = stats.get("vector_count", "Unknown")
-                    detailed_message = f"✅ Successfully initialized RAG database!\n📄 Documents processed: {doc_count}\n🔍 Vectors created: {vector_count}\n💾 Database status: Active"
+                    detailed_message = f"✅ Successfully initialized RAG database!\n📄 Documents processed: {doc_count}\n💾 Database status: Active"
                     return detailed_message, f"{doc_count}"
                 else:
                     return f"✅ RAG database created but status unclear: {doc_count} documents processed", f"{doc_count}"

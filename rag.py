@@ -409,8 +409,13 @@ class RAGManager:
             # Get sample embedding to check dimensions
             try:
                 sample = collection.get(limit=1, include=["embeddings"])
-                if sample and sample.get("embeddings") and len(sample["embeddings"]) > 0:
-                    dimensions = len(sample["embeddings"][0])
+                embeddings = sample.get("embeddings") if sample else None
+                if embeddings is not None and len(embeddings) > 0:
+                    first_embedding = embeddings[0]
+                    if first_embedding is not None:
+                        dimensions = len(first_embedding)
+                    else:
+                        dimensions = 0
                 else:
                     dimensions = 0
             except Exception as e:

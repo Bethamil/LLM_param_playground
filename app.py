@@ -65,6 +65,32 @@ def update_judge_visibility(enable_judge):
         gr.update(visible=enable_judge)   # judge_column (output)
     )
 
+def update_rag_visibility(enable_rag):
+    """
+    Show RAG configuration and output sections only when RAG is enabled.
+    """
+    return (
+        gr.update(visible=enable_rag),  # rag_config_section
+        gr.update(visible=enable_rag)   # rag_column (output)
+    )
+
+def update_rag_visibility_and_status(enable_rag, provider):
+    """
+    Update RAG visibility and auto-load database status when RAG is enabled/disabled.
+    """
+    # Get visibility updates
+    rag_config_visible = gr.update(visible=enable_rag)
+    rag_column_visible = gr.update(visible=enable_rag)
+
+    # Get status update
+    status_message = auto_load_rag_database(enable_rag, provider)
+
+    return (
+        rag_config_visible,  # rag_config_section
+        rag_column_visible,  # rag_column
+        status_message       # rag_status
+    )
+
 def update_judge_llm_config_visibility(enable_judge, use_same_llm):
     """
     Show judge LLM configuration only when judge is enabled and not using same LLM.
@@ -294,7 +320,9 @@ def auto_load_rag_database(rag_enabled, provider):
         if success:
             stats = rag_manager.get_database_stats()
             if stats.get("status") == "Active":
-                return f"✅ Auto-loaded existing database | Documents: {stats['document_count']}"
+                doc_count = stats.get('document_count', 'Unknown')
+                vector_count = stats.get('vector_count', 'Unknown')
+                return f"✅ Auto-loaded existing database\n📄 Documents: {doc_count}\n🔍 Vectors: {vector_count}\n💾 Status: Active"
             else:
                 return f"⚠️ Database exists but couldn't load: {stats['status']}"
         else:
@@ -326,16 +354,8 @@ def initialize_or_update_rag_database(knowledge_base_path, file_pattern):
         tuple: (status_message, doc_count_message)
     """
     try:
-        # Check if database already exists and is working
-        if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
-            try:
-                existing_success, _ = load_existing_vector_db()
-                if existing_success:
-                    stats = rag_manager.get_database_stats()
-                    if stats.get("status") == "Active":
-                        return f"✅ Using existing database | Documents: {stats['document_count']} | Tip: Only initialize if you have new documents", f"Documents: {stats['document_count']}"
-            except:
-                pass  # Continue with recreation if existing DB has issues
+        # Note: Always recreate the database when Initialize button is clicked
+        # This ensures new documents are included
 
         # Step 1: Load documents
         success, doc_message, doc_count = load_knowledge_base(knowledge_base_path, file_pattern)
@@ -347,12 +367,22 @@ def initialize_or_update_rag_database(knowledge_base_path, file_pattern):
         db_success, db_message = create_vector_db()
 
         if db_success:
-            return f"✅ Successfully initialized RAG database: {doc_count} documents loaded and indexed", f"Documents: {doc_count}"
+            # Get detailed stats after successful creation
+            try:
+                stats = rag_manager.get_database_stats()
+                if stats and stats.get("status") == "Active":
+                    vector_count = stats.get("vector_count", "Unknown")
+                    detailed_message = f"✅ Successfully initialized RAG database!\n📄 Documents processed: {doc_count}\n🔍 Vectors created: {vector_count}\n💾 Database status: Active"
+                    return detailed_message, f"{doc_count}"
+                else:
+                    return f"✅ RAG database created but status unclear: {doc_count} documents processed", f"{doc_count}"
+            except:
+                return f"✅ Successfully initialized RAG database: {doc_count} documents loaded and indexed", f"{doc_count}"
         else:
-            return f"⚠️ Documents loaded but database creation failed: {db_message}", f"Documents: {doc_count}"
+            return f"⚠️ Documents loaded but database creation failed: {db_message}", f"{doc_count}"
 
     except Exception as e:
-        return f"❌ Error initializing RAG database: {str(e)}", "Documents: 0"
+        return f"❌ Error initializing RAG database: {str(e)}", "0"
 
 
 def prepare_messages_with_rag(system, prompt):
@@ -648,11 +678,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
     # RAG Section
     gr.Markdown("## RAG (Retrieval Augmented Generation)")
-    with gr.Row():
-        enable_rag = gr.Checkbox(value=config.DEFAULT_RAG_ENABLED, label="Enable RAG")
-        rag_status = gr.Textbox(label="RAG Status", value="Not initialized", interactive=False)
+    enable_rag = gr.Checkbox(value=config.DEFAULT_RAG_ENABLED, label="Enable RAG", info="Enable Retrieval Augmented Generation for context-aware responses")
 
-    with gr.Accordion("RAG Configuration", open=False):
+    # RAG configuration (visible only when RAG is enabled)
+    with gr.Column(visible=False) as rag_config_section:
+        gr.Markdown("### RAG Configuration")
         with gr.Row():
             knowledge_base_path = gr.Textbox(
                 label="Knowledge Base Path",
@@ -670,17 +700,34 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         with gr.Row():
             initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)", variant="primary")
 
-        # Check if database exists on page load
+        # Check if database exists on page load and get detailed info
         initial_status = "📂 No database found - click Initialize to create one"
         initial_docs = "0"
         if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
-            initial_status = "📁 Database folder found - enable RAG to auto-load"
+            try:
+                # Try to get stats without fully loading
+                success, _ = load_existing_vector_db()
+                if success:
+                    stats = rag_manager.get_database_stats()
+                    if stats and stats.get("status") == "Active":
+                        doc_count = stats.get('document_count', 'Unknown')
+                        vector_count = stats.get('vector_count', 'Unknown')
+                        initial_status = f"📁 Database ready to load\n📄 Documents: {doc_count}\n🔍 Vectors: {vector_count}"
+                        initial_docs = str(doc_count)
+                    else:
+                        initial_status = "📁 Database folder found - enable RAG to auto-load"
+                else:
+                    initial_status = "📁 Database folder found - enable RAG to auto-load"
+            except:
+                initial_status = "📁 Database folder found - enable RAG to auto-load"
 
+        # RAG Status Display
         with gr.Row():
-            rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False)
+            rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False, lines=4, max_lines=4)
             doc_count = gr.Textbox(label="Documents", value=initial_docs, interactive=False)
 
-    with gr.Accordion("Vector Visualization", open=False):
+        # Vector Visualization
+        gr.Markdown("### Vector Visualization")
         with gr.Row():
             viz_2d_btn = gr.Button("Generate 2D Plot")
             viz_3d_btn = gr.Button("Generate 3D Plot")
@@ -773,8 +820,6 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     gr.Markdown("## Output Section")
     # Textbox for displaying reasoning tokens when available
     reasoning_output = gr.Textbox(label="Model Reasoning", lines=5, visible=True)
-    # Textbox for displaying retrieved context when RAG is enabled
-    context_output = gr.Textbox(label="Retrieved Context", lines=8, visible=False)
     # Textbox for displaying successful model responses
     response_output = gr.Textbox(label="Model Response", lines=10)
     # Textbox for displaying errors (hidden by default)
@@ -783,6 +828,13 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Messages Accordion Section
     with gr.Accordion("Full Message Array", open=False):
         messages_output = gr.JSON(label="Conversation Messages", value=[])
+
+    # RAG Output Section
+    with gr.Column(visible=False) as rag_column:
+        gr.Markdown("## RAG Information")
+        # Textbox for displaying retrieved context when RAG is enabled
+        context_output = gr.Textbox(label="Retrieved Context", lines=8, info="Documents retrieved from the knowledge base")
+
 
     # Judge Output Section
     with gr.Column(visible=False) as judge_column:
@@ -805,6 +857,13 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         fn=update_judge_llm_config_visibility,
         inputs=[enable_judge, use_same_llm],
         outputs=judge_llm_config
+    )
+
+    # Event handler for RAG enable/disable
+    enable_rag.change(
+        fn=update_rag_visibility_and_status,
+        inputs=[enable_rag, provider_radio],
+        outputs=[rag_config_section, rag_column, rag_status]
     )
 
     # Metadata Section (moved to bottom)
@@ -917,11 +976,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                         judge_reasoning_value = ""
 
                     yield (gr.update(value=reasoning_value),
-                           gr.update(value=retrieved_context, visible=use_rag),
                            gr.update(value=full_response),
                            gr.update(value="", visible=False),
                            "",
                            messages,
+                           gr.update(value=retrieved_context),
                            gr.update(value=judge_score_value),
                            gr.update(value=judge_confidence_value),
                            gr.update(value=judge_feedback_value),
@@ -940,11 +999,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
                 if enable_judge:
                     yield (gr.update(value=reasoning_value),
-                           gr.update(value=retrieved_context, visible=use_rag),
                            gr.update(value=full_response),
                            gr.update(value="", visible=False),
                            metadata_temp,
                            messages + [{"role": "assistant", "content": full_response}],
+                           gr.update(value=retrieved_context),
                            gr.update(value=None),  # Number fields must remain None during loading
                            gr.update(value=None),
                            gr.update(value="🤖 Judge is evaluating the response..."),
@@ -981,11 +1040,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
                 # Yield with loading states for judge fields
                 yield (gr.update(value=reasoning_value),
-                       gr.update(value=retrieved_context, visible=use_rag),
                        gr.update(value=full_response),
                        gr.update(value="", visible=False),
                        metadata,
                        messages,
+                       gr.update(value=retrieved_context),
                        gr.update(value=None),  # Number fields must remain None during loading
                        gr.update(value=None),
                        gr.update(value="🤖 Judge is evaluating the response..."),
@@ -1041,11 +1100,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         # Yield with appropriate visibility for error output
         if error_message:
             yield (gr.update(value="No reasoning tokens included"),
-                   gr.update(value="", visible=False),
                    gr.update(value=""),
                    gr.update(value=error_message, visible=True),
                    metadata,
                    messages,
+                   gr.update(value=""),
                    gr.update(value=judge_score),
                    gr.update(value=judge_confidence),
                    gr.update(value=judge_feedback),
@@ -1054,11 +1113,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         else:
             reasoning_value = reasoning if reasoning else "No reasoning tokens included"
             yield (gr.update(value=reasoning_value),
-                   gr.update(value=retrieved_context, visible=use_rag),
                    gr.update(value=full_response),
                    gr.update(value="", visible=False),
                    metadata,
                    messages,
+                   gr.update(value=retrieved_context),
                    gr.update(value=judge_score),
                    gr.update(value=judge_confidence),
                    gr.update(value=judge_feedback),
@@ -1082,12 +1141,6 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         outputs=[viz_3d_plot]
     )
 
-    # Update RAG status when RAG is enabled/disabled
-    enable_rag.change(
-        fn=auto_load_rag_database,
-        inputs=[enable_rag, provider_radio],
-        outputs=[rag_status]
-    )
 
     # Event handler for the generate button
     # Calls generate_response function with all input values and updates output components
@@ -1096,7 +1149,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming, enable_rag, custom_api_key,
                 enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
                 judge_temperature, judge_criteria, scoring_scale],
-        outputs=[reasoning_output, context_output, response_output, error_output, metadata, messages_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column]
+        outputs=[reasoning_output, response_output, error_output, metadata, messages_output, context_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column]
     )
 
 # Main execution block

@@ -20,30 +20,83 @@ class RAGManager:
     and retrieval chain management.
     """
 
-    def __init__(self, openai_api_key=None, db_name=None):
+    def __init__(self, openai_api_key=None, db_name=None, embedding_provider=None, embedding_model=None, embedding_base_url=None):
         """
         Initialize RAG Manager.
 
         Args:
             openai_api_key (str): OpenAI API key for embeddings
             db_name (str): Name of the vector database directory (defaults to config value)
+            embedding_provider (str): Embedding provider ("OpenAI" or "Custom")
+            embedding_model (str): Embedding model name
+            embedding_base_url (str): Custom embedding base URL
         """
         self.db_name = db_name or config.DEFAULT_VECTOR_DB_NAME
         self.vectorstore = None
         self.documents = []
         self.chunks = []
         self.embeddings = None
+        self.embedding_provider = embedding_provider or config.DEFAULT_EMBEDDING_PROVIDER
+        self.embedding_model = embedding_model or config.DEFAULT_EMBEDDING_MODEL
+        self.embedding_base_url = embedding_base_url
 
         # Initialize embeddings if API key is provided
         if openai_api_key:
-            self.embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+            self.set_embeddings(openai_api_key, self.embedding_provider, self.embedding_model, self.embedding_base_url)
 
     def set_api_key(self, api_key):
-        """Set or update the OpenAI API key for embeddings."""
-        if api_key:
-            self.embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        """Set or update the OpenAI API key for embeddings (legacy method)."""
+        return self.set_embeddings(api_key, self.embedding_provider, self.embedding_model, self.embedding_base_url)
+
+    def set_embeddings(self, api_key, provider=None, model=None, base_url=None):
+        """
+        Set or update embedding configuration.
+
+        Args:
+            api_key (str): API key for embeddings (can be empty for local services)
+            provider (str): Embedding provider ("OpenAI" or "Custom")
+            model (str): Embedding model name
+            base_url (str): Custom embedding base URL
+        """
+        provider = provider or self.embedding_provider
+        model = model or self.embedding_model
+        base_url = base_url or self.embedding_base_url
+
+        # API key is required for all providers
+        if not api_key or not api_key.strip():
+            return False
+
+        try:
+            if provider == "OpenAI":
+                self.embeddings = OpenAIEmbeddings(
+                    openai_api_key=api_key,
+                    model=model
+                )
+            elif provider == "Custom":
+                # Use OpenAI-compatible embedding endpoint with custom base URL
+                print(f"Setting custom embeddings with base_url: {base_url}, model: {model}")
+                self.embeddings = OpenAIEmbeddings(
+                    openai_api_key=api_key,
+                    model=model,
+                    base_url=base_url,
+                    check_embedding_ctx_length=False  # Disable context length checking for custom endpoints
+                )
+            else:
+                print(f"Unknown provider: {provider}")
+                return False
+
+            # Update instance variables
+            self.embedding_provider = provider
+            self.embedding_model = model
+            self.embedding_base_url = base_url
+
+            print(f"Successfully set embeddings: provider={provider}, model={model}")
             return True
-        return False
+        except Exception as e:
+            print(f"Error setting embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def load_documents_from_folder(self, knowledge_base_path, file_pattern=None):
         """

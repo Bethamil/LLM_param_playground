@@ -91,6 +91,12 @@ def update_rag_visibility_and_status(enable_rag, provider):
         status_message       # rag_status
     )
 
+def update_embedding_custom_visibility(embedding_provider):
+    """
+    Show custom embedding configuration only when Custom embedding provider is selected.
+    """
+    return gr.update(visible=embedding_provider == "Custom")
+
 def update_judge_llm_config_visibility(enable_judge, use_same_llm):
     """
     Show judge LLM configuration only when judge is enabled and not using same LLM.
@@ -268,20 +274,43 @@ def format_metadata(model, provider, response_time, usage, error_message, judge_
 """
 
 # RAG-specific functions
-def initialize_rag_with_api_key(provider, api_key, custom_api_key):
-    """Initialize RAG manager with appropriate API key based on provider."""
-    openai_key = None
+def initialize_rag_with_api_key(provider, api_key, custom_api_key, embedding_provider=None, embedding_model=None, embedding_base_url=None, embedding_api_key=None):
+    """Initialize RAG manager with appropriate API key and embedding configuration."""
+    # Determine the API key for embeddings
+    if embedding_provider == "Custom":
+        # Custom provider requires API key
+        if not embedding_api_key or not embedding_api_key.strip():
+            return False, "Custom embedding provider requires an API key"
+        embedding_key = embedding_api_key
+    else:
+        # Use main provider API key for OpenAI embeddings
+        if provider == "OpenAI":
+            embedding_key = os.getenv("OPENAI_API_KEY") or api_key
+        elif provider == "OpenRouter":
+            embedding_key = os.getenv("OPENROUTER_API_KEY") or api_key
+        elif provider == "Custom":
+            embedding_key = custom_api_key
+        else:
+            embedding_key = None
 
-    if provider == "OpenAI":
-        openai_key = os.getenv("OPENAI_API_KEY") or api_key
-    elif provider == "OpenRouter":
-        openai_key = os.getenv("OPENROUTER_API_KEY") or api_key
-    elif provider == "Custom":
-        openai_key = custom_api_key
+    if embedding_key:
+        # Determine the correct model based on provider
+        if embedding_provider == "Custom":
+            model_to_use = embedding_model or config.DEFAULT_CUSTOM_EMBEDDING_MODEL
+        else:
+            model_to_use = config.DEFAULT_EMBEDDING_MODEL  # Use OpenAI default for OpenAI provider
 
-    if openai_key:
-        rag_manager.set_api_key(openai_key)
-        return True, "RAG initialized with API key"
+        # Update RAG manager with new embedding configuration
+        success = rag_manager.set_embeddings(
+            api_key=embedding_key,
+            provider=embedding_provider or config.DEFAULT_EMBEDDING_PROVIDER,
+            model=model_to_use,
+            base_url=embedding_base_url
+        )
+        if success:
+            return True, f"RAG initialized with {embedding_provider or 'OpenAI'} embeddings"
+        else:
+            return False, "Failed to initialize embeddings - check console for details"
     else:
         return False, "No API key available for RAG initialization"
 
@@ -304,13 +333,16 @@ def load_existing_vector_db():
     success, message = rag_manager.load_existing_vector_database()
     return success, f"Vector DB: {message}"
 
-def auto_load_rag_database(rag_enabled, provider):
+def auto_load_rag_database(rag_enabled, provider, embedding_provider=None):
     """Auto-load existing database when RAG is enabled (using environment API keys)."""
     if not rag_enabled:
         return "RAG disabled"
 
-    # Initialize RAG with environment API key
-    rag_success, rag_message = initialize_rag_with_api_key(provider, None, None)  # Use env keys
+    # Initialize RAG with environment API key and default embedding settings
+    rag_success, rag_message = initialize_rag_with_api_key(
+        provider, None, None,  # Use env keys
+        embedding_provider=embedding_provider or config.DEFAULT_EMBEDDING_PROVIDER
+    )
     if not rag_success:
         return f"⚠️ {rag_message}"
 
@@ -341,14 +373,20 @@ def create_3d_visualization():
     return fig
 
 
-def initialize_or_update_rag_database(knowledge_base_path, file_pattern):
+def initialize_or_update_rag_database(knowledge_base_path, file_pattern, provider, custom_api_key, embedding_provider, embedding_model, embedding_base_url, embedding_api_key):
     """
     Combined function to load documents and create/update vector database in one step.
-    Only recreates embeddings when necessary (new documents or no existing database).
+    Always recreates embeddings to ensure new documents are included.
 
     Args:
         knowledge_base_path (str): Path to knowledge base folder
         file_pattern (str): File pattern to match
+        provider (str): Main LLM provider
+        custom_api_key (str): Custom API key for main provider
+        embedding_provider (str): Embedding provider ("OpenAI" or "Custom")
+        embedding_model (str): Embedding model name
+        embedding_base_url (str): Custom embedding base URL
+        embedding_api_key (str): Embedding API key
 
     Returns:
         tuple: (status_message, doc_count_message)
@@ -357,13 +395,23 @@ def initialize_or_update_rag_database(knowledge_base_path, file_pattern):
         # Note: Always recreate the database when Initialize button is clicked
         # This ensures new documents are included
 
-        # Step 1: Load documents
+        # Step 1: Initialize embeddings with the provided configuration
+        print(f"Step 1: Initializing embeddings...")
+        rag_success, rag_message = initialize_rag_with_api_key(
+            provider, None, custom_api_key,  # Use provided API keys
+            embedding_provider, embedding_model, embedding_base_url, embedding_api_key
+        )
+        if not rag_success:
+            return f"❌ Failed to initialize embeddings: {rag_message}", "0"
+
+        # Step 2: Load documents
         success, doc_message, doc_count = load_knowledge_base(knowledge_base_path, file_pattern)
 
         if not success:
             return f"❌ {doc_message}", "Documents: 0"
 
-        # Step 2: Create/Update vector database (recreate embeddings)
+        # Step 3: Create/Update vector database (recreate embeddings)
+        print(f"Step 3: Creating vector database...")
         db_success, db_message = create_vector_db()
 
         if db_success:
@@ -683,6 +731,41 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # RAG configuration (visible only when RAG is enabled)
     with gr.Column(visible=False) as rag_config_section:
         gr.Markdown("### RAG Configuration")
+
+        # Embedding Provider Configuration
+        gr.Markdown("#### Embedding Model")
+        embedding_provider = gr.Radio(
+            choices=config.EMBEDDING_PROVIDERS,
+            value=config.DEFAULT_EMBEDDING_PROVIDER,
+            label="Embedding Provider",
+            info="Choose the provider for generating document embeddings"
+        )
+
+        # Custom Embedding Configuration (visible only when Custom is selected)
+        with gr.Column(visible=False) as embedding_custom_config:
+            gr.Markdown("##### Custom Embedding Configuration")
+            with gr.Row():
+                embedding_base_url = gr.Textbox(
+                    label="Embedding Base URL",
+                    value=config.DEFAULT_CUSTOM_EMBEDDING_BASE_URL,
+                    placeholder="http://localhost:11434/v1",
+                    info="OpenAI-compatible embedding endpoint URL"
+                )
+                embedding_model = gr.Textbox(
+                    label="Embedding Model",
+                    value=config.DEFAULT_CUSTOM_EMBEDDING_MODEL,
+                    placeholder="nomic-embed-text",
+                    info="Name of the embedding model for your custom endpoint"
+                )
+            embedding_api_key = gr.Textbox(
+                label="Embedding API Key",
+                type="password",
+                placeholder="Required for custom embedding endpoints",
+                info="API key for your custom embedding service (e.g., for Ollama use any value like 'ollama')"
+            )
+
+        # Document Configuration
+        gr.Markdown("#### Document Processing")
         with gr.Row():
             knowledge_base_path = gr.Textbox(
                 label="Knowledge Base Path",
@@ -866,6 +949,13 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         outputs=[rag_config_section, rag_column, rag_status]
     )
 
+    # Event handler for embedding provider selection
+    embedding_provider.change(
+        fn=update_embedding_custom_visibility,
+        inputs=embedding_provider,
+        outputs=embedding_custom_config
+    )
+
     # Metadata Section (moved to bottom)
     gr.Markdown("## Metadata")
     # Markdown display for response metadata (model, time, tokens, judge info)
@@ -874,7 +964,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Function for generating responses with error handling
     def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream, use_rag, custom_api_key,
                          enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dd, judge_model_tb,
-                         judge_temp, criteria, scale):
+                         judge_temp, criteria, scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key):
         """
         Generate response from LLM API based on selected provider and parameters.
         Includes comprehensive error handling for API calls, RAG functionality, and judge evaluation.
@@ -918,7 +1008,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
         # Initialize RAG if enabled
         if use_rag:
-            rag_success, rag_message = initialize_rag_with_api_key(provider, api_key, custom_api_key)
+            rag_success, rag_message = initialize_rag_with_api_key(
+                provider, api_key, custom_api_key,
+                embedding_provider, embedding_model, embedding_base_url, embedding_api_key
+            )
             if not rag_success:
                 error_message = f"RAG initialization failed: {rag_message}"
 
@@ -1127,7 +1220,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # RAG Event Handlers
     initialize_rag_btn.click(
         fn=initialize_or_update_rag_database,
-        inputs=[knowledge_base_path, file_pattern],
+        inputs=[knowledge_base_path, file_pattern, provider_radio, custom_api_key, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
         outputs=[rag_status, doc_count]
     )
 
@@ -1148,7 +1241,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         fn=generate_response,
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming, enable_rag, custom_api_key,
                 enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
-                judge_temperature, judge_criteria, scoring_scale],
+                judge_temperature, judge_criteria, scoring_scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
         outputs=[reasoning_output, response_output, error_output, metadata, messages_output, context_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column]
     )
 

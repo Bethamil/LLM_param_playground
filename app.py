@@ -21,10 +21,8 @@ Dependencies:
 
 import gradio as gr
 import config
-import openai
 import os
 import time
-import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
 from rag import RAGManager
 
@@ -279,13 +277,29 @@ def load_existing_vector_db():
     success, message = rag_manager.load_existing_vector_database()
     return success, f"Vector DB: {message}"
 
-def get_db_stats():
-    """Get database statistics."""
-    stats = rag_manager.get_database_stats()
-    if stats.get("status") == "Active":
-        return f"Status: Active | Documents: {stats['document_count']} | Dimensions: {stats['embedding_dimensions']}"
+def auto_load_rag_database(rag_enabled, provider):
+    """Auto-load existing database when RAG is enabled (using environment API keys)."""
+    if not rag_enabled:
+        return "RAG disabled"
+
+    # Initialize RAG with environment API key
+    rag_success, rag_message = initialize_rag_with_api_key(provider, None, None)  # Use env keys
+    if not rag_success:
+        return f"⚠️ {rag_message}"
+
+    # Check if database exists and try to load it
+    if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
+        success, message = load_existing_vector_db()
+        if success:
+            stats = rag_manager.get_database_stats()
+            if stats.get("status") == "Active":
+                return f"✅ Auto-loaded existing database | Documents: {stats['document_count']}"
+            else:
+                return f"⚠️ Database exists but couldn't load: {stats['status']}"
+        else:
+            return f"⚠️ Database folder exists but couldn't load"
     else:
-        return f"Status: {stats['status']}"
+        return "📂 No database found - click Initialize to create one"
 
 def create_2d_visualization():
     """Create 2D vector visualization."""
@@ -298,73 +312,119 @@ def create_3d_visualization():
     return fig
 
 
-def delete_vector_db():
-    """Delete vector database."""
-    success, message = rag_manager.delete_vector_database()
-    return f"Delete: {message}"
-
-def prepare_rag_messages(system, prompt, use_rag):
+def initialize_or_update_rag_database(knowledge_base_path, file_pattern):
     """
-    Prepare messages for API call, optionally including RAG context.
+    Combined function to load documents and create/update vector database in one step.
+    Only recreates embeddings when necessary (new documents or no existing database).
+
+    Args:
+        knowledge_base_path (str): Path to knowledge base folder
+        file_pattern (str): File pattern to match
+
+    Returns:
+        tuple: (status_message, doc_count_message)
+    """
+    try:
+        # Check if database already exists and is working
+        if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
+            try:
+                existing_success, _ = load_existing_vector_db()
+                if existing_success:
+                    stats = rag_manager.get_database_stats()
+                    if stats.get("status") == "Active":
+                        return f"✅ Using existing database | Documents: {stats['document_count']} | Tip: Only initialize if you have new documents", f"Documents: {stats['document_count']}"
+            except:
+                pass  # Continue with recreation if existing DB has issues
+
+        # Step 1: Load documents
+        success, doc_message, doc_count = load_knowledge_base(knowledge_base_path, file_pattern)
+
+        if not success:
+            return f"❌ {doc_message}", "Documents: 0"
+
+        # Step 2: Create/Update vector database (recreate embeddings)
+        db_success, db_message = create_vector_db()
+
+        if db_success:
+            return f"✅ Successfully initialized RAG database: {doc_count} documents loaded and indexed", f"Documents: {doc_count}"
+        else:
+            return f"⚠️ Documents loaded but database creation failed: {db_message}", f"Documents: {doc_count}"
+
+    except Exception as e:
+        return f"❌ Error initializing RAG database: {str(e)}", "Documents: 0"
+
+
+def prepare_messages_with_rag(system, prompt):
+    """
+    Prepare messages for API call with RAG context included.
 
     Args:
         system (str): System message
         prompt (str): User prompt
-        use_rag (bool): Whether to use RAG
 
     Returns:
         tuple: (messages, retrieved_context)
     """
-    if use_rag:
-        retrieved_docs = rag_manager.get_retrieval_context(prompt)  # Uses config.DEFAULT_RETRIEVAL_K
-        if retrieved_docs:
-            # Format retrieved context with similarity scores
-            context_parts = []
-            llm_context_parts = []
+    retrieved_docs = rag_manager.get_retrieval_context(prompt)  # Uses config.DEFAULT_RETRIEVAL_K
+    if retrieved_docs:
+        # Format retrieved context with similarity scores
+        context_parts = []
+        llm_context_parts = []
 
-            for i, doc in enumerate(retrieved_docs):
-                doc_type = doc.metadata.get('doc_type', 'unknown')
-                similarity_score = doc.metadata.get('similarity_score', 'N/A')
-                similarity_percentage = doc.metadata.get('similarity_percentage', 'N/A')
+        for i, doc in enumerate(retrieved_docs):
+            doc_type = doc.metadata.get('doc_type', 'unknown')
+            similarity_score = doc.metadata.get('similarity_score', 'N/A')
+            similarity_percentage = doc.metadata.get('similarity_percentage', 'N/A')
 
-                # Format for user display (with scores)
-                if isinstance(similarity_score, float):
-                    score_display = f"Distance: {similarity_score:.4f} | Similarity: {similarity_percentage:.1f}%"
-                else:
-                    score_display = "Score: N/A"
+            # Format for user display (with scores)
+            if isinstance(similarity_score, float):
+                score_display = f"Distance: {similarity_score:.4f} | Similarity: {similarity_percentage:.1f}%"
+            else:
+                score_display = "Score: N/A"
 
-                context_parts.append(
-                    f"**Document {i+1}** (Type: {doc_type}) | {score_display}\n"
-                    f"Content: {doc.page_content}\n"
-                    f"{'='*80}"
-                )
+            context_parts.append(
+                f"**Document {i+1}** (Type: {doc_type}) | {score_display}\n"
+                f"Content: {doc.page_content}\n"
+                f"{'='*80}"
+            )
 
-                # Format for LLM context (without scores to reduce token usage)
-                llm_context_parts.append(f"Document {i+1} (Type: {doc_type}):\n{doc.page_content}")
+            # Format for LLM context (without scores to reduce token usage)
+            llm_context_parts.append(f"Document {i+1} (Type: {doc_type}):\n{doc.page_content}")
 
-            # User-facing context with scores
-            user_context = "\n\n".join(context_parts)
+        # User-facing context with scores
+        user_context = "\n\n".join(context_parts)
 
-            # LLM context without scores
-            llm_context = "\n\n".join(llm_context_parts)
+        # LLM context without scores
+        llm_context = "\n\n".join(llm_context_parts)
 
-            # Modify system message to include context for LLM
-            enhanced_system = f"{system}\n\nRelevant context from knowledge base:\n{llm_context}\n\nPlease use this context to inform your response when relevant."
+        # Modify system message to include context for LLM
+        enhanced_system = f"{system}\n\nRelevant context from knowledge base:\n{llm_context}\n\nPlease use this context to inform your response when relevant."
 
-            return [
-                {"role": "system", "content": enhanced_system},
-                {"role": "user", "content": prompt}
-            ], user_context
-        else:
-            return [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt}
-            ], "No relevant documents found in knowledge base."
+        return [
+            {"role": "system", "content": enhanced_system},
+            {"role": "user", "content": prompt}
+        ], user_context
     else:
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt}
-        ], ""
+        ], "No relevant documents found in knowledge base."
+
+def prepare_messages(system, prompt):
+    """
+    Prepare standard messages for API call without RAG.
+
+    Args:
+        system (str): System message
+        prompt (str): User prompt
+
+    Returns:
+        tuple: (messages, empty_context)
+    """
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt}
+    ], ""
 
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
@@ -469,14 +529,17 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             )
 
         with gr.Row():
-            load_docs_btn = gr.Button("Load Documents")
-            create_db_btn = gr.Button("Create Vector DB")
-            load_db_btn = gr.Button("Load Existing DB")
-            delete_db_btn = gr.Button("Delete DB")
+            initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)", variant="primary")
+
+        # Check if database exists on page load
+        initial_status = "📂 No database found - click Initialize to create one"
+        initial_docs = "0"
+        if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
+            initial_status = "📁 Database folder found - enable RAG to auto-load"
 
         with gr.Row():
-            doc_status = gr.Textbox(label="Document Status", interactive=False)
-            db_status = gr.Textbox(label="Vector DB Status", interactive=False)
+            rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False)
+            doc_count = gr.Textbox(label="Documents", value=initial_docs, interactive=False)
 
     with gr.Accordion("Vector Visualization", open=False):
         with gr.Row():
@@ -558,7 +621,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         client = create_client(api_base_url, api_key_final)
 
         # Prepare messages for the API call (with or without RAG)
-        messages, retrieved_context = prepare_rag_messages(system, prompt, use_rag and not error_message)
+        if use_rag and not error_message:
+            messages, retrieved_context = prepare_messages_with_rag(system, prompt)
+        else:
+            messages, retrieved_context = prepare_messages(system, prompt)
 
         # Record start time for response time calculation
         start_time = time.time()
@@ -627,25 +693,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                    messages)
 
     # RAG Event Handlers
-    load_docs_btn.click(
-        fn=load_knowledge_base,
+    initialize_rag_btn.click(
+        fn=initialize_or_update_rag_database,
         inputs=[knowledge_base_path, file_pattern],
-        outputs=[doc_status, db_status]
-    )
-
-    create_db_btn.click(
-        fn=create_vector_db,
-        outputs=[db_status]
-    )
-
-    load_db_btn.click(
-        fn=load_existing_vector_db,
-        outputs=[db_status]
-    )
-
-    delete_db_btn.click(
-        fn=delete_vector_db,
-        outputs=[db_status]
+        outputs=[rag_status, doc_count]
     )
 
     viz_2d_btn.click(
@@ -658,9 +709,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         outputs=[viz_3d_plot]
     )
 
-    # Update RAG status when database operations are performed
+    # Update RAG status when RAG is enabled/disabled
     enable_rag.change(
-        fn=get_db_stats,
+        fn=auto_load_rag_database,
+        inputs=[enable_rag, provider_radio],
         outputs=[rag_status]
     )
 

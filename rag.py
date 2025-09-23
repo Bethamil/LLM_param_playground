@@ -407,15 +407,28 @@ class RAGManager:
                 return {"status": "Vector database is empty"}
 
             # Get sample embedding to check dimensions
-            sample = collection.get(limit=1, include=["embeddings"])
-            dimensions = len(sample["embeddings"][0]) if sample["embeddings"] else 0
+            try:
+                sample = collection.get(limit=1, include=["embeddings"])
+                if sample and sample.get("embeddings") and len(sample["embeddings"]) > 0:
+                    dimensions = len(sample["embeddings"][0])
+                else:
+                    dimensions = 0
+            except Exception as e:
+                print(f"Error getting sample embedding: {e}")
+                dimensions = 0
 
             # Get document types if available
-            all_data = collection.get(include=["metadatas"])
-            doc_types = {}
-            for metadata in all_data["metadatas"]:
-                doc_type = metadata.get("doc_type", "unknown")
-                doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
+            try:
+                all_data = collection.get(include=["metadatas"])
+                doc_types = {}
+                if all_data and all_data.get("metadatas"):
+                    for metadata in all_data["metadatas"]:
+                        if metadata:  # Check if metadata is not None
+                            doc_type = metadata.get("doc_type", "unknown")
+                            doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
+            except Exception as e:
+                print(f"Error getting document types: {e}")
+                doc_types = {}
 
             return {
                 "status": "Active",
@@ -428,26 +441,3 @@ class RAGManager:
             return {"status": f"Error: {str(e)}"}
 
 
-    def delete_vector_database(self):
-        """
-        Delete the vector database.
-
-        Returns:
-            tuple: (success, message)
-        """
-        try:
-            if self.vectorstore:
-                self.vectorstore.delete_collection()
-
-            if os.path.exists(self.db_name):
-                import shutil
-                shutil.rmtree(self.db_name)
-
-            self.vectorstore = None
-            self.conversation_chain = None
-            self.memory = None
-
-            return True, "Vector database deleted successfully."
-
-        except Exception as e:
-            return False, f"Error deleting vector database: {str(e)}"

@@ -37,6 +37,16 @@ DEFAULT_FREQUENCY_PENALTY = 0.0
 DEFAULT_PRESENCE_PENALTY = 0.0
 DEFAULT_STREAMING = True
 
+# RAG (Retrieval Augmented Generation) settings
+DEFAULT_RAG_ENABLED = False
+DEFAULT_VECTOR_DB_NAME = "vector_db"
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 200
+DEFAULT_RETRIEVAL_K = 5
+DEFAULT_KNOWLEDGE_BASE_PATH = "knowledge-base"
+RAG_FILE_PATTERNS = ["**/*.md", "**/*.txt", "**/*.pdf"]
+MAX_VISUALIZATION_VECTORS = 1000
+
 # API base URLs
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

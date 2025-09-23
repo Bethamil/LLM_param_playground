@@ -26,6 +26,10 @@ import os
 import time
 import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
+from rag import RAGManager
+
+# Initialize RAG manager
+rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME, openai_api_key=os.getenv("OPENAI_API_KEY"))
 
 def update_model_choices(provider):
     """
@@ -238,6 +242,130 @@ def format_metadata(model, provider, response_time, usage, error_message):
 **Token Usage:** {usage.total_tokens if usage else 'N/A'}
 """
 
+# RAG-specific functions
+def initialize_rag_with_api_key(provider, api_key, custom_api_key):
+    """Initialize RAG manager with appropriate API key based on provider."""
+    openai_key = None
+
+    if provider == "OpenAI":
+        openai_key = os.getenv("OPENAI_API_KEY") or api_key
+    elif provider == "OpenRouter":
+        openai_key = os.getenv("OPENROUTER_API_KEY") or api_key
+    elif provider == "Custom":
+        openai_key = custom_api_key
+
+    if openai_key:
+        rag_manager.set_api_key(openai_key)
+        return True, "RAG initialized with API key"
+    else:
+        return False, "No API key available for RAG initialization"
+
+def load_knowledge_base(knowledge_base_path, file_pattern):
+    """Load documents from knowledge base."""
+    if not knowledge_base_path:
+        return False, "Please specify a knowledge base path", "No documents loaded"
+
+    success, message, doc_count = rag_manager.load_documents_from_folder(knowledge_base_path, file_pattern)
+    status_msg = f"Status: {message}"
+    return success, status_msg, f"Documents: {doc_count}" if success else "Documents: 0"
+
+def create_vector_db():
+    """Create vector database from loaded documents."""
+    success, message = rag_manager.create_vector_database()
+    return success, f"Vector DB: {message}"
+
+def load_existing_vector_db():
+    """Load existing vector database."""
+    success, message = rag_manager.load_existing_vector_database()
+    return success, f"Vector DB: {message}"
+
+def get_db_stats():
+    """Get database statistics."""
+    stats = rag_manager.get_database_stats()
+    if stats.get("status") == "Active":
+        return f"Status: Active | Documents: {stats['document_count']} | Dimensions: {stats['embedding_dimensions']}"
+    else:
+        return f"Status: {stats['status']}"
+
+def create_2d_visualization():
+    """Create 2D vector visualization."""
+    fig = rag_manager.create_vector_visualization(dimensions=2)
+    return fig
+
+def create_3d_visualization():
+    """Create 3D vector visualization."""
+    fig = rag_manager.create_vector_visualization(dimensions=3)
+    return fig
+
+
+def delete_vector_db():
+    """Delete vector database."""
+    success, message = rag_manager.delete_vector_database()
+    return f"Delete: {message}"
+
+def prepare_rag_messages(system, prompt, use_rag):
+    """
+    Prepare messages for API call, optionally including RAG context.
+
+    Args:
+        system (str): System message
+        prompt (str): User prompt
+        use_rag (bool): Whether to use RAG
+
+    Returns:
+        tuple: (messages, retrieved_context)
+    """
+    if use_rag:
+        retrieved_docs = rag_manager.get_retrieval_context(prompt)  # Uses config.DEFAULT_RETRIEVAL_K
+        if retrieved_docs:
+            # Format retrieved context with similarity scores
+            context_parts = []
+            llm_context_parts = []
+
+            for i, doc in enumerate(retrieved_docs):
+                doc_type = doc.metadata.get('doc_type', 'unknown')
+                similarity_score = doc.metadata.get('similarity_score', 'N/A')
+                similarity_percentage = doc.metadata.get('similarity_percentage', 'N/A')
+
+                # Format for user display (with scores)
+                if isinstance(similarity_score, float):
+                    score_display = f"Distance: {similarity_score:.4f} | Similarity: {similarity_percentage:.1f}%"
+                else:
+                    score_display = "Score: N/A"
+
+                context_parts.append(
+                    f"**Document {i+1}** (Type: {doc_type}) | {score_display}\n"
+                    f"Content: {doc.page_content}\n"
+                    f"{'='*80}"
+                )
+
+                # Format for LLM context (without scores to reduce token usage)
+                llm_context_parts.append(f"Document {i+1} (Type: {doc_type}):\n{doc.page_content}")
+
+            # User-facing context with scores
+            user_context = "\n\n".join(context_parts)
+
+            # LLM context without scores
+            llm_context = "\n\n".join(llm_context_parts)
+
+            # Modify system message to include context for LLM
+            enhanced_system = f"{system}\n\nRelevant context from knowledge base:\n{llm_context}\n\nPlease use this context to inform your response when relevant."
+
+            return [
+                {"role": "system", "content": enhanced_system},
+                {"role": "user", "content": prompt}
+            ], user_context
+        else:
+            return [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt}
+            ], "No relevant documents found in knowledge base."
+    else:
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ], ""
+
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
 with gr.Blocks(title="LLM Interactive Client") as demo:
@@ -319,6 +447,46 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Checkbox to enable/disable streaming responses
     streaming = gr.Checkbox(value=config.DEFAULT_STREAMING, label="Streaming Responses")
 
+    # RAG Section
+    gr.Markdown("## RAG (Retrieval Augmented Generation)")
+    with gr.Row():
+        enable_rag = gr.Checkbox(value=config.DEFAULT_RAG_ENABLED, label="Enable RAG")
+        rag_status = gr.Textbox(label="RAG Status", value="Not initialized", interactive=False)
+
+    with gr.Accordion("RAG Configuration", open=False):
+        with gr.Row():
+            knowledge_base_path = gr.Textbox(
+                label="Knowledge Base Path",
+                value=config.DEFAULT_KNOWLEDGE_BASE_PATH,
+                placeholder="Path to your knowledge base folder",
+                info="Folder containing documents to index"
+            )
+            file_pattern = gr.Dropdown(
+                choices=config.RAG_FILE_PATTERNS,
+                value=config.RAG_FILE_PATTERNS[0],
+                label="File Pattern",
+                info="Type of files to process"
+            )
+
+        with gr.Row():
+            load_docs_btn = gr.Button("Load Documents")
+            create_db_btn = gr.Button("Create Vector DB")
+            load_db_btn = gr.Button("Load Existing DB")
+            delete_db_btn = gr.Button("Delete DB")
+
+        with gr.Row():
+            doc_status = gr.Textbox(label="Document Status", interactive=False)
+            db_status = gr.Textbox(label="Vector DB Status", interactive=False)
+
+    with gr.Accordion("Vector Visualization", open=False):
+        with gr.Row():
+            viz_2d_btn = gr.Button("Generate 2D Plot")
+            viz_3d_btn = gr.Button("Generate 3D Plot")
+
+        with gr.Row():
+            viz_2d_plot = gr.Plot(label="2D Vector Visualization")
+            viz_3d_plot = gr.Plot(label="3D Vector Visualization")
+
     # Generate button to trigger API call
     generate_btn = gr.Button("Generate")
 
@@ -326,6 +494,8 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     gr.Markdown("## Output Section")
     # Textbox for displaying reasoning tokens when available
     reasoning_output = gr.Textbox(label="Model Reasoning", lines=5, visible=True)
+    # Textbox for displaying retrieved context when RAG is enabled
+    context_output = gr.Textbox(label="Retrieved Context", lines=8, visible=False)
     # Textbox for displaying successful model responses
     response_output = gr.Textbox(label="Model Response", lines=10)
     # Textbox for displaying errors (hidden by default)
@@ -341,10 +511,10 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         messages_output = gr.JSON(label="Conversation Messages", value=[])
 
     # Function for generating responses with error handling
-    def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
+    def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream, use_rag, custom_api_key):
         """
         Generate response from LLM API based on selected provider and parameters.
-        Includes comprehensive error handling for API calls.
+        Includes comprehensive error handling for API calls and RAG functionality.
 
         Args:
             provider (str): Selected provider ("OpenAI", "OpenRouter", "Custom")
@@ -360,15 +530,24 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
             freq_pen (float): Frequency penalty
             pres_pen (float): Presence penalty
             stream (bool): Whether to use streaming
+            use_rag (bool): Whether to use RAG
+            custom_api_key (str): Custom API key for RAG
 
         Yields:
-            tuple: (gr.update for reasoning, gr.update for response, gr.update for error, metadata_str, api_messages)
+            tuple: (gr.update for reasoning, gr.update for context, gr.update for response, gr.update for error, metadata_str, api_messages)
         """
         # Initialize variables
         full_response = ""
         reasoning = ""
         usage = None
         error_message = ""
+        retrieved_context = ""
+
+        # Initialize RAG if enabled
+        if use_rag:
+            rag_success, rag_message = initialize_rag_with_api_key(provider, api_key, custom_api_key)
+            if not rag_success:
+                error_message = f"RAG initialization failed: {rag_message}"
 
         # Determine model, API base URL, and API key using helper functions
         model = get_model(provider, model_dd, model_tb)
@@ -378,8 +557,8 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         # Create OpenAI client instance
         client = create_client(api_base_url, api_key_final)
 
-        # Prepare messages for the API call
-        messages = prepare_messages(system, prompt)
+        # Prepare messages for the API call (with or without RAG)
+        messages, retrieved_context = prepare_rag_messages(system, prompt, use_rag and not error_message)
 
         # Record start time for response time calculation
         start_time = time.time()
@@ -392,6 +571,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                 for partial, last_usage, last_reasoning in handle_streaming_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen):
                     reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
                     yield (gr.update(value=reasoning_value),
+                           gr.update(value=retrieved_context, visible=use_rag),
                            gr.update(value=partial),
                            gr.update(value="", visible=False),
                            "",
@@ -432,6 +612,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         # Yield with appropriate visibility for error output
         if error_message:
             yield (gr.update(value="No reasoning tokens included"),
+                   gr.update(value="", visible=False),
                    gr.update(value=""),
                    gr.update(value=error_message, visible=True),
                    metadata,
@@ -439,17 +620,56 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         else:
             reasoning_value = reasoning if reasoning else "No reasoning tokens included"
             yield (gr.update(value=reasoning_value),
+                   gr.update(value=retrieved_context, visible=use_rag),
                    gr.update(value=full_response),
                    gr.update(value="", visible=False),
                    metadata,
                    messages)
 
+    # RAG Event Handlers
+    load_docs_btn.click(
+        fn=load_knowledge_base,
+        inputs=[knowledge_base_path, file_pattern],
+        outputs=[doc_status, db_status]
+    )
+
+    create_db_btn.click(
+        fn=create_vector_db,
+        outputs=[db_status]
+    )
+
+    load_db_btn.click(
+        fn=load_existing_vector_db,
+        outputs=[db_status]
+    )
+
+    delete_db_btn.click(
+        fn=delete_vector_db,
+        outputs=[db_status]
+    )
+
+    viz_2d_btn.click(
+        fn=create_2d_visualization,
+        outputs=[viz_2d_plot]
+    )
+
+    viz_3d_btn.click(
+        fn=create_3d_visualization,
+        outputs=[viz_3d_plot]
+    )
+
+    # Update RAG status when database operations are performed
+    enable_rag.change(
+        fn=get_db_stats,
+        outputs=[rag_status]
+    )
+
     # Event handler for the generate button
     # Calls generate_response function with all input values and updates output components
     generate_btn.click(
         fn=generate_response,
-        inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming],
-        outputs=[reasoning_output, response_output, error_output, metadata, messages_output]
+        inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming, enable_rag, custom_api_key],
+        outputs=[reasoning_output, context_output, response_output, error_output, metadata, messages_output]
     )
 
 # Main execution block

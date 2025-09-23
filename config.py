@@ -37,6 +37,23 @@ DEFAULT_FREQUENCY_PENALTY = 0.0
 DEFAULT_PRESENCE_PENALTY = 0.0
 DEFAULT_STREAMING = True
 
+# RAG (Retrieval Augmented Generation) settings
+DEFAULT_RAG_ENABLED = False
+DEFAULT_VECTOR_DB_NAME = "vector_db"
+DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CHUNK_OVERLAP = 150
+DEFAULT_RETRIEVAL_K = 5
+DEFAULT_KNOWLEDGE_BASE_PATH = "knowledge-base"
+RAG_FILE_PATTERNS = ["**/*.md", "**/*.txt", "**/*.pdf"]
+MAX_VISUALIZATION_VECTORS = 1000
+
+# Embedding model settings
+EMBEDDING_PROVIDERS = ["OpenAI", "Custom"]
+DEFAULT_EMBEDDING_PROVIDER = "OpenAI"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_CUSTOM_EMBEDDING_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_CUSTOM_EMBEDDING_MODEL = "nomic-embed-text"
+
 # API base URLs
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

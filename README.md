@@ -28,6 +28,10 @@ LLM Param Playground bridges the gap between complex LLM APIs and end-users, mak
 - **Streaming Support**: Progressive response display for better user experience.
 - **Performance Monitoring**: Displays metadata for response time and token usage.
 - **Extensibility**: Designed for future features like multi-turn conversations, file uploads, and model comparison.
+- **RAG (Retrieval Augmented Generation)**: Built-in support for knowledge-based question answering using vector databases.
+- **Custom Embeddings**: Support for both OpenAI embeddings and custom embedding models (e.g., Ollama).
+- **Vector Visualization**: 3D visualization of document embeddings for knowledge base exploration.
+- **Flexible Document Processing**: Support for multiple file types and categorized knowledge organization.
 
 ## Installation
 
@@ -70,6 +74,69 @@ Create a `.env` file in the project root based on `.env.example`. Configure the 
 - `CUSTOM_API_KEY`: API key for custom endpoints (optional).
 
 The application prioritizes environment variables for security and does not log or persist sensitive data.
+
+## RAG (Retrieval Augmented Generation)
+
+The application includes built-in RAG functionality that allows you to create a knowledge base and ask questions based on your documents.
+
+### Setting Up Your Knowledge Base
+
+1. **Create the knowledge base folder**: Create a `knowledge-base` folder in the project root (or specify a custom path in the UI).
+
+2. **Organize your documents**: You can organize documents in subfolders for categorization:
+   ```
+   knowledge-base/
+   ├── company-docs/
+   │   ├── policies.md
+   │   └── procedures.md
+   ├── technical-docs/
+   │   ├── api-guide.md
+   │   └── troubleshooting.md
+   └── faq.md
+   ```
+
+3. **Supported file types**:
+   - **Recommended**: `.md` (Markdown) files for testing and general use
+   - Also supported: `.txt` and `.pdf` files
+   - Use the file pattern dropdown to select which types to process
+
+### Using RAG
+
+1. **Enable RAG**: Check the "Enable RAG" checkbox in the interface.
+
+2. **Configure embeddings** (choose one):
+   - **OpenAI**: Uses OpenAI's `text-embedding-3-small` model (1536 dimensions)
+   - **Custom**: Use local embedding models like Ollama's `nomic-embed-text` (768 dimensions)
+
+3. **For Custom embeddings** (e.g., Ollama):
+   - Set Embedding Provider to "Custom"
+   - Set Base URL to your local endpoint (e.g., `http://localhost:11434/v1`)
+   - Set Model to your embedding model (e.g., `nomic-embed-text`)
+   - Provide an API key (for Ollama, any value like "ollama" works)
+
+4. **Initialize the database**:
+   - Set the knowledge base path (default: `knowledge-base`)
+   - Choose file pattern (default: `**/*.md`)
+   - Click "🚀 Initialize RAG Database"
+   - Wait for processing to complete
+
+5. **Ask questions**: Once initialized, your questions will be enhanced with relevant context from your knowledge base.
+
+### RAG Features
+
+- **Document Processing**: Automatically chunks documents for optimal retrieval
+- **Vector Database**: Uses Chroma for efficient similarity search
+- **Context Display**: View retrieved documents in the expandable "RAG Information" section
+- **3D Visualization**: Explore your knowledge base visually with the 3D vector plot
+- **Embedding Flexibility**: Switch between OpenAI and custom embedding models
+- **Status Monitoring**: Real-time feedback on database status, document count, and embedding dimensions
+
+### Tips for Best Results
+
+- **Use .md files** for testing as they're well-structured and easy to read
+- **Organize by category** using subfolders for better document type tracking
+- **Keep documents focused** - shorter, topic-specific documents often work better than very long ones
+- **Consistent embedding models** - stick with one embedding model per knowledge base to avoid dimension mismatches
 
 ## Goals
 

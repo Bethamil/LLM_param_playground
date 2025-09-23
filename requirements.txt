@@ -1,3 +1,13 @@
 gradio
 openai
 python-dotenv
+langchain
+langchain-community
+langchain-openai
+langchain-chroma
+langchain-text-splitters
+chromadb
+scikit-learn
+plotly
+matplotlib
+numpy

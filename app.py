@@ -745,10 +745,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
 
     # RAG configuration (visible only when RAG is enabled)
     with gr.Column(visible=False) as rag_config_section:
-        gr.Markdown("### RAG Configuration")
-
         # Embedding Provider Configuration
-        gr.Markdown("#### Embedding Model")
         embedding_provider = gr.Radio(
             choices=config.EMBEDDING_PROVIDERS,
             value=config.DEFAULT_EMBEDDING_PROVIDER,

@@ -537,7 +537,11 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Textbox for displaying successful model responses
     response_output = gr.Textbox(label="Model Response", lines=10)
     # Textbox for displaying errors (hidden by default)
-    error_output = gr.Textbox(label="Errors", visible=False)
+    error_output = gr.Textbox(label="Errors", lines=5, visible=False)
+
+    # Messages Accordion Section
+    with gr.Accordion("Full Message Array", open=False):
+        messages_output = gr.JSON(label="Conversation Messages", value=[])
 
     # Judge Output Section
     with gr.Column(visible=False) as judge_column:
@@ -561,10 +565,6 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         inputs=[enable_judge, use_same_llm],
         outputs=judge_llm_config
     )
-
-    # Messages Accordion Section
-    with gr.Accordion("Full Message Array", open=False):
-        messages_output = gr.JSON(label="Conversation Messages", value=[])
 
     # Metadata Section (moved to bottom)
     gr.Markdown("## Metadata")

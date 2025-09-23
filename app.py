@@ -27,8 +27,8 @@ import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
 from rag import RAGManager
 
-# Initialize RAG manager
-rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME, openai_api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize RAG manager without specific embeddings (will be configured when needed)
+rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME)
 
 def update_model_choices(provider):
     """
@@ -74,7 +74,7 @@ def update_rag_visibility(enable_rag):
         gr.update(visible=enable_rag)   # rag_column (output)
     )
 
-def update_rag_visibility_and_status(enable_rag, provider):
+def update_rag_visibility_and_status(enable_rag, provider, embedding_provider, embedding_model, embedding_base_url, embedding_api_key):
     """
     Update RAG visibility and auto-load database status when RAG is enabled/disabled.
     """
@@ -82,8 +82,8 @@ def update_rag_visibility_and_status(enable_rag, provider):
     rag_config_visible = gr.update(visible=enable_rag)
     rag_column_visible = gr.update(visible=enable_rag)
 
-    # Get status update
-    status_message = auto_load_rag_database(enable_rag, provider)
+    # Get status update with current embedding settings
+    status_message = auto_load_rag_database(enable_rag, provider, embedding_provider, embedding_model, embedding_base_url, embedding_api_key)
 
     return (
         rag_config_visible,  # rag_config_section
@@ -332,32 +332,45 @@ def load_existing_vector_db():
     success, message = rag_manager.load_existing_vector_database()
     return success, f"Vector DB: {message}"
 
-def auto_load_rag_database(rag_enabled, provider, embedding_provider=None):
-    """Auto-load existing database when RAG is enabled (using environment API keys)."""
+def auto_load_rag_database(rag_enabled, provider, embedding_provider=None, embedding_model=None, embedding_base_url=None, embedding_api_key=None):
+    """Auto-load existing database when RAG is enabled."""
     if not rag_enabled:
         return "RAG disabled"
 
-    # Initialize RAG with environment API key and default embedding settings
-    rag_success, rag_message = initialize_rag_with_api_key(
-        provider, None, None,  # Use env keys
-        embedding_provider=embedding_provider or config.DEFAULT_EMBEDDING_PROVIDER
-    )
-    if not rag_success:
-        return f"⚠️ {rag_message}"
+    # Check if database exists (including timestamped ones)
+    import glob
+    db_pattern = f"{config.DEFAULT_VECTOR_DB_NAME}*"
+    existing_dbs = glob.glob(db_pattern)
 
-    # Check if database exists and try to load it
-    if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
-        success, message = load_existing_vector_db()
-        if success:
-            stats = rag_manager.get_database_stats()
-            if stats.get("status") == "Active":
-                doc_count = stats.get('document_count', 'Unknown')
-                vector_count = stats.get('vector_count', 'Unknown')
-                return f"✅ Auto-loaded existing database\n📄 Documents: {doc_count}\n🔍 Vectors: {vector_count}\n💾 Status: Active"
+    if existing_dbs:
+        # Use the most recent database
+        most_recent_db = sorted(existing_dbs)[-1]
+        rag_manager.db_name = most_recent_db
+
+        # Try to initialize embeddings and load database for visualization
+        try:
+            # Initialize with current embedding settings
+            rag_success, rag_message = initialize_rag_with_api_key(
+                provider, None, None,  # No main API keys needed
+                embedding_provider, embedding_model, embedding_base_url, embedding_api_key
+            )
+
+            if rag_success:
+                # Load the existing database
+                load_success, load_message = rag_manager.load_existing_vector_database()
+                if load_success:
+                    stats = rag_manager.get_database_stats()
+                    if stats.get("status") == "Active":
+                        doc_count = stats.get('document_count', 'Unknown')
+                        return f"✅ Database loaded: {doc_count} documents"
+                    else:
+                        return f"⚠️ Database loaded but inactive: {stats.get('status', 'Unknown')}"
+                else:
+                    return f"📁 Database found but couldn't load: {load_message}"
             else:
-                return f"⚠️ Database exists but couldn't load: {stats['status']}"
-        else:
-            return f"⚠️ Database folder exists but couldn't load"
+                return f"📁 Database found: {os.path.basename(most_recent_db)} (embeddings not configured)"
+        except Exception as e:
+            return f"📁 Database found: {os.path.basename(most_recent_db)} (load error: {str(e)})"
     else:
         return "📂 No database found - click Initialize to create one"
 
@@ -767,52 +780,64 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             )
 
         # Document Configuration
-        gr.Markdown("#### Document Processing")
-        with gr.Row():
-            knowledge_base_path = gr.Textbox(
-                label="Knowledge Base Path",
-                value=config.DEFAULT_KNOWLEDGE_BASE_PATH,
-                placeholder="Path to your knowledge base folder",
-                info="Folder containing documents to index"
-            )
-            file_pattern = gr.Dropdown(
-                choices=config.RAG_FILE_PATTERNS,
-                value=config.RAG_FILE_PATTERNS[0],
-                label="File Pattern",
-                info="Type of files to process"
-            )
+        with gr.Accordion("Document Processing", open=False):
+            with gr.Row():
+                knowledge_base_path = gr.Textbox(
+                    label="Knowledge Base Path",
+                    value=config.DEFAULT_KNOWLEDGE_BASE_PATH,
+                    placeholder="Path to your knowledge base folder",
+                    info="Folder containing documents to index"
+                )
+                file_pattern = gr.Dropdown(
+                    choices=config.RAG_FILE_PATTERNS,
+                    value=config.RAG_FILE_PATTERNS[0],
+                    label="File Pattern",
+                    info="Type of files to process"
+                )
 
-        with gr.Row():
-            initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)")
+            with gr.Row():
+                initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)")
 
-        # Check if database exists on page load and get detailed info
-        initial_status = "📂 No database found - click Initialize to create one"
-        initial_docs = "0"
-        if os.path.exists(config.DEFAULT_VECTOR_DB_NAME):
-            try:
-                # Try to get stats without fully loading
-                success, _ = load_existing_vector_db()
-                if success:
-                    stats = rag_manager.get_database_stats()
-                    if stats and stats.get("status") == "Active":
-                        doc_count = stats.get('document_count', 'Unknown')
-                        vector_count = stats.get('vector_count', 'Unknown')
-                        initial_status = f"📁 Database ready to load\n📄 Documents: {doc_count}\n🔍 Vectors: {vector_count}"
-                        initial_docs = str(doc_count)
+            # Check if database exists on page load and get detailed info
+            initial_status = "📂 No database found - click Initialize to create one"
+            initial_docs = "0"
+
+            # Check for any vector database (including timestamped ones)
+            import glob
+            db_pattern = f"{config.DEFAULT_VECTOR_DB_NAME}*"
+            existing_dbs = glob.glob(db_pattern)
+
+            if existing_dbs:
+                try:
+                    # Find the most recent database (highest timestamp)
+                    most_recent_db = sorted(existing_dbs)[-1]
+
+                    # Update the RAG manager to use the most recent database
+                    rag_manager.db_name = most_recent_db
+
+                    # Try to get stats without fully loading
+                    success, _ = load_existing_vector_db()
+                    if success:
+                        stats = rag_manager.get_database_stats()
+                        if stats and stats.get("status") == "Active":
+                            doc_count = stats.get('document_count', 'Unknown')
+                            vector_count = stats.get('vector_count', 'Unknown')
+                            initial_status = f"📁 Database ready to load\n📄 Documents: {doc_count}\n🔍 Vectors: {vector_count}"
+                            initial_docs = str(doc_count)
+                        else:
+                            initial_status = "📁 Database folder found - enable RAG to auto-load"
                     else:
                         initial_status = "📁 Database folder found - enable RAG to auto-load"
-                else:
+                except:
                     initial_status = "📁 Database folder found - enable RAG to auto-load"
-            except:
-                initial_status = "📁 Database folder found - enable RAG to auto-load"
 
-        # RAG Status Display
-        rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False, lines=4, max_lines=4)
+            # RAG Status Display
+            rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False, lines=4, max_lines=4)
 
         # Vector Visualization
-        gr.Markdown("### Vector Visualization")
-        viz_3d_btn = gr.Button("Generate 3D Plot")
-        viz_3d_plot = gr.Plot(label="3D Vector Visualization")
+        with gr.Accordion("Vector Visualization", open=False):
+            viz_3d_btn = gr.Button("Generate 3D Plot")
+            viz_3d_plot = gr.Plot(label="3D Vector Visualization")
 
     # Judge Configuration Section
     gr.Markdown("## LLM Judge Configuration")
@@ -941,7 +966,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Event handler for RAG enable/disable
     enable_rag.change(
         fn=update_rag_visibility_and_status,
-        inputs=[enable_rag, provider_radio],
+        inputs=[enable_rag, provider_radio, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
         outputs=[rag_config_section, rag_column, rag_status]
     )
 
@@ -1010,6 +1035,15 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             )
             if not rag_success:
                 error_message = f"RAG initialization failed: {rag_message}"
+            else:
+                # After successful embedding initialization, try to load existing database
+                try:
+                    if os.path.exists(rag_manager.db_name):
+                        load_success, load_message = rag_manager.load_existing_vector_database()
+                        if not load_success:
+                            print(f"Warning: Could not load existing database: {load_message}")
+                except Exception as e:
+                    print(f"Warning: Error loading existing database: {e}")
 
         # Judge evaluation variables
         judge_score = None

@@ -176,13 +176,48 @@ class RAGManager:
             if not self.chunks:
                 return False, "No documents loaded. Please load documents first."
 
-            # Delete existing database if it exists
+            # Handle existing database by using a fresh database name
             if os.path.exists(self.db_name):
                 try:
-                    existing_vectorstore = Chroma(persist_directory=self.db_name, embedding_function=self.embeddings)
-                    existing_vectorstore.delete_collection()
+                    import shutil
+                    import time
+
+                    # First, properly close any existing vectorstore
+                    if hasattr(self, 'vectorstore') and self.vectorstore:
+                        self.vectorstore = None
+
+                    # Use a new database name with timestamp to avoid conflicts
+                    timestamp = int(time.time())
+                    new_db_name = f"{self.db_name}_{timestamp}"
+
+                    # Update the database name for this instance
+                    old_db_name = self.db_name
+                    self.db_name = new_db_name
+
+                    # Clean up old databases in background
+                    def cleanup_old_dbs():
+                        try:
+                            time.sleep(2)
+                            # Remove the old database
+                            if os.path.exists(old_db_name):
+                                shutil.rmtree(old_db_name, ignore_errors=True)
+
+                            # Clean up any other old timestamped databases (keep only the newest)
+                            import glob
+                            pattern = f"{config.DEFAULT_VECTOR_DB_NAME}_*"
+                            old_dbs = sorted(glob.glob(pattern))
+                            if len(old_dbs) > 1:
+                                for old_db in old_dbs[:-1]:  # Keep the newest one
+                                    shutil.rmtree(old_db, ignore_errors=True)
+                        except:
+                            pass
+
+                    import threading
+                    threading.Thread(target=cleanup_old_dbs, daemon=True).start()
+
+                    print(f"Creating new database: {self.db_name}")
                 except Exception as e:
-                    print(f"Warning: Could not delete existing collection: {e}")
+                    print(f"Warning: Could not handle existing database: {e}")
 
             # Create new vectorstore
             self.vectorstore = Chroma.from_documents(
@@ -220,7 +255,10 @@ class RAGManager:
             return True, f"Successfully loaded existing vector database with {count} documents."
 
         except Exception as e:
-            return False, f"Error loading vector database: {str(e)}"
+            error_msg = str(e)
+            if "expecting embedding with dimension" in error_msg:
+                return False, f"Dimension mismatch: The database was created with a different embedding model. Please recreate the database with your current embedding settings."
+            return False, f"Error loading vector database: {error_msg}"
 
 
     def get_retrieval_context(self, question, k=None):
@@ -242,6 +280,15 @@ class RAGManager:
             if k is None:
                 k = config.DEFAULT_RETRIEVAL_K
 
+            # Debug: Check what embeddings we're actually generating
+            if self.embeddings:
+                try:
+                    test_embedding = self.embeddings.embed_query("test")
+                    print(f"Debug: Current embedding dimensions: {len(test_embedding)}")
+                    print(f"Debug: Embedding config: {self.embedding_provider}/{self.embedding_model}")
+                except Exception as embed_error:
+                    print(f"Debug: Error testing embedding: {embed_error}")
+
             # Use similarity search with scores to get relevance information
             retrieved_docs_with_scores = self.vectorstore.similarity_search_with_score(question, k=k)
 
@@ -254,7 +301,17 @@ class RAGManager:
             return [doc for doc, _ in retrieved_docs_with_scores]
 
         except Exception as e:
+            error_msg = str(e)
             print(f"Error retrieving context: {e}")
+
+            # Check if it's a dimension mismatch error
+            if "expecting embedding with dimension" in error_msg:
+                print("Dimension mismatch detected. The vector database was created with a different embedding model.")
+                print(f"Current embedding config: Provider={self.embedding_provider}, Model={self.embedding_model}")
+                if hasattr(self, 'embedding_base_url') and self.embedding_base_url:
+                    print(f"Base URL: {self.embedding_base_url}")
+                print("Please recreate the database by clicking 'Initialize RAG Database' with your current embedding settings.")
+
             return []
 
     def create_vector_visualization(self, dimensions=2, sample_size=None):
@@ -306,26 +363,16 @@ class RAGManager:
                 print("Debug: Empty embeddings list")
                 return None
 
-            print(f"Debug: Number of embeddings: {len(embeddings_data)}")
-            print(f"Debug: Type of embeddings_data: {type(embeddings_data)}")
-
             try:
-                print("Debug: Creating numpy array from embeddings...")
                 vectors = np.array(embeddings_data)
-                print(f"Debug: Vector array shape: {vectors.shape}")
-                print(f"Debug: Vector array dtype: {vectors.dtype}")
 
-                print("Debug: Getting documents...")
                 documents = result.get('documents', [])
                 if documents is None:
                     documents = []
-                print(f"Debug: Documents type: {type(documents)}, count: {len(documents)}")
 
-                print("Debug: Getting metadatas...")
                 metadatas = result.get('metadatas', [])
                 if metadatas is None:
                     metadatas = []
-                print(f"Debug: Metadatas type: {type(metadatas)}, count: {len(metadatas)}")
 
             except Exception as e:
                 print(f"Error processing vector data: {e}")
@@ -338,7 +385,6 @@ class RAGManager:
             num_documents = len(documents)
             num_metadatas = len(metadatas)
 
-            print(f"Debug: Lengths - vectors: {num_vectors}, documents: {num_documents}, metadatas: {num_metadatas}")
 
             if num_vectors != num_documents or num_vectors != num_metadatas:
                 print("Warning: Inconsistent data lengths, truncating to shortest")
@@ -346,7 +392,6 @@ class RAGManager:
                 vectors = vectors[:min_len]
                 documents = documents[:min_len]
                 metadatas = metadatas[:min_len]
-                print(f"Debug: After truncation - vectors: {vectors.shape[0]}, documents: {len(documents)}, metadatas: {len(metadatas)}")
 
             # Get document types and assign colors
             doc_types = [metadata.get('doc_type', 'unknown') if metadata else 'unknown' for metadata in metadatas]
@@ -360,10 +405,8 @@ class RAGManager:
             # Reduce dimensionality using t-SNE
             # Ensure we have enough vectors for t-SNE
             final_vector_count = vectors.shape[0] if vectors.size > 0 else 0
-            print(f"Debug: Final vector count for t-SNE: {final_vector_count}")
 
             if final_vector_count < 2:
-                print("Debug: Not enough vectors for t-SNE (need at least 2)")
                 return None
 
             try:

@@ -8,4 +8,4 @@ ENV/
 env.bak/
 venv.bak/
 knowledge-base
-vector_db
+vector_db_*

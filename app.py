@@ -21,7 +21,6 @@ Dependencies:
 
 import gradio as gr
 import config
-import openai
 import os
 import time
 import json
@@ -50,6 +49,12 @@ def update_custom_fields(provider):
     """
     visible = provider == "Custom"
     return gr.update(visible=visible)
+
+def update_judge_visibility(enable_judge):
+    """
+    Show judge evaluation section only when judge is enabled.
+    """
+    return gr.update(visible=enable_judge)
 
 def get_model(provider, model_dd, model_tb):
     """
@@ -238,6 +243,94 @@ def format_metadata(model, provider, response_time, usage, error_message):
 **Token Usage:** {usage.total_tokens if usage else 'N/A'}
 """
 
+def evaluate_with_judge(client, judge_model, system, prompt, response, criteria, scale, temperature):
+    """
+    Evaluate a response using an LLM judge.
+
+    Args:
+        client (OpenAI): The judge client instance.
+        judge_model (str): The judge model name.
+        system (str): Original system message.
+        prompt (str): Original user prompt.
+        response (str): The response to evaluate.
+        criteria (str): Evaluation criteria.
+        scale (str): Scoring scale ("1-5", "1-10", "1-100").
+        temperature (float): Judge temperature.
+
+    Returns:
+        tuple: (score, confidence, feedback, reasoning)
+    """
+    max_score = int(scale.split('-')[1])
+
+    judge_prompt = f"""You are an expert judge evaluating AI responses. Please evaluate the following response based on these criteria: {criteria}
+
+Original Query: {prompt}
+Original System: {system}
+
+Response to evaluate: {response}
+
+Please provide your evaluation in the following JSON format:
+{{
+    "score": <numerical score between 1 and {max_score}>,
+    "confidence": <confidence in your score between 0 and 1>,
+    "feedback": "<brief feedback on the response quality>",
+    "reasoning": "<your reasoning process for the score>"
+}}
+
+Be strict but fair in your evaluation. Consider accuracy, helpfulness, clarity, and relevance."""
+
+    try:
+        judge_response = client.chat.completions.create(
+            model=judge_model,
+            messages=[{"role": "user", "content": judge_prompt}],
+            temperature=temperature,
+            max_completion_tokens=1000,
+            stream=False
+        )
+
+        # Parse the JSON response
+        result_text = judge_response.choices[0].message.content.strip()
+
+        # Try to extract JSON from the response
+        try:
+            # Look for JSON in the response
+            start_idx = result_text.find('{')
+            end_idx = result_text.rfind('}') + 1
+            if start_idx != -1 and end_idx != -1:
+                json_str = result_text[start_idx:end_idx]
+                result = json.loads(json_str)
+
+                score = float(result.get('score', 0))
+                confidence = float(result.get('confidence', 0))
+                feedback = str(result.get('feedback', ''))
+                reasoning = str(result.get('reasoning', ''))
+
+                return score, confidence, feedback, reasoning
+            else:
+                # Fallback parsing if no JSON found
+                return 0, 0, "Could not parse judge response", result_text
+        except json.JSONDecodeError:
+            return 0, 0, "Invalid JSON in judge response", result_text
+
+    except Exception as e:
+        return 0, 0, f"Judge evaluation failed: {str(e)}", str(e)
+
+def get_judge_client(judge_provider, judge_base_url, judge_api_key):
+    """
+    Create a judge client instance.
+
+    Args:
+        judge_provider (str): The judge provider.
+        judge_base_url (str): Custom judge base URL.
+        judge_api_key (str): Judge API key.
+
+    Returns:
+        OpenAI: Judge client instance.
+    """
+    api_base_url = get_api_base_url(judge_provider, judge_base_url)
+    api_key_final = get_api_key(judge_provider, judge_api_key)
+    return create_client(api_base_url, api_key_final)
+
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
 with gr.Blocks(title="LLM Interactive Client") as demo:
@@ -258,12 +351,12 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         gr.Markdown("### Custom Provider Configuration")
         with gr.Row():
             custom_base_url = gr.Textbox(
-                label="Custom Endpoint URL", 
+                label="Custom Endpoint URL",
                 placeholder="https://your-api-endpoint.com/v1",
                 info="Enter your custom OpenAI-compatible API endpoint"
             )
             custom_api_key = gr.Textbox(
-                label="Custom API Key", 
+                label="Custom API Key",
                 type="password",
                 info="API key for your custom endpoint"
             )
@@ -319,6 +412,77 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Checkbox to enable/disable streaming responses
     streaming = gr.Checkbox(value=config.DEFAULT_STREAMING, label="Streaming Responses")
 
+    # Judge Configuration Section
+    gr.Markdown("## LLM Judge Configuration")
+    with gr.Row():
+        enable_judge = gr.Checkbox(value=False, label="Enable LLM Judge", info="Use another LLM to evaluate and score the response")
+        judge_provider = gr.Radio(
+            choices=config.PROVIDERS,
+            value="OpenAI",
+            label="Judge Provider",
+            info="Provider for the judge LLM"
+        )
+
+    # Judge Custom Provider Configuration (visible only when Custom is selected)
+    with gr.Column(visible=False) as judge_custom_row:
+        gr.Markdown("### Judge Custom Provider Configuration")
+        with gr.Row():
+            judge_base_url = gr.Textbox(
+                label="Judge Endpoint URL",
+                placeholder="https://your-judge-api-endpoint.com/v1",
+                info="Enter your custom judge API endpoint"
+            )
+            judge_api_key = gr.Textbox(
+                label="Judge API Key",
+                type="password",
+                info="API key for your judge endpoint"
+            )
+
+    # Judge Model Selection
+    with gr.Row():
+        judge_model_dropdown = gr.Dropdown(
+            choices=config.get_models_for_provider("OpenAI"),
+            value=config.get_models_for_provider("OpenAI")[0] if config.get_models_for_provider("OpenAI") else None,
+            label="Judge Model",
+            visible=True
+        )
+        judge_model_textbox = gr.Textbox(
+            label="Custom Judge Model",
+            placeholder="e.g., gpt-4, claude-3-opus",
+            info="Enter the exact judge model name",
+            visible=False
+        )
+
+    # Judge Parameters
+    with gr.Row():
+        judge_temperature = gr.Slider(minimum=0.0, maximum=2.0, value=0.1, label="Judge Temperature", info="Lower values make judge scoring more consistent")
+        scoring_scale = gr.Radio(
+            choices=["1-5", "1-10", "1-100"],
+            value="1-10",
+            label="Scoring Scale",
+            info="Scale for judge scoring"
+        )
+
+    # Judge Criteria
+    judge_criteria = gr.Textbox(
+        label="Judge Criteria",
+        lines=3,
+        value="Evaluate the response for: accuracy, helpfulness, clarity, and relevance to the query.",
+        info="Criteria for the judge to evaluate the response against"
+    )
+
+    # Event handlers for judge provider selection
+    judge_provider.change(
+        fn=update_model_choices,
+        inputs=judge_provider,
+        outputs=[judge_model_dropdown, judge_model_textbox]
+    )
+    judge_provider.change(
+        fn=update_custom_fields,
+        inputs=judge_provider,
+        outputs=[judge_custom_row]
+    )
+
     # Generate button to trigger API call
     generate_btn = gr.Button("Generate")
 
@@ -336,12 +500,30 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     # Markdown display for response metadata (model, time, tokens)
     metadata = gr.Markdown(label="Response Metadata")
 
+    # Judge Output Section
+    with gr.Column(visible=False) as judge_column:
+        gr.Markdown("## Judge Evaluation")
+        with gr.Row():
+            judge_score = gr.Number(label="Judge Score", value=None, precision=2, info="Score from the LLM judge")
+            judge_confidence = gr.Number(label="Judge Confidence", value=None, precision=2, info="Judge's confidence in the score (0-1)")
+        judge_feedback = gr.Textbox(label="Judge Feedback", lines=5, info="Detailed feedback from the judge")
+        judge_reasoning = gr.Textbox(label="Judge Reasoning", lines=3, info="Judge's reasoning process")
+
+    # Event handler for judge enable/disable
+    enable_judge.change(
+        fn=update_judge_visibility,
+        inputs=enable_judge,
+        outputs=judge_column
+    )
+
     # Messages Accordion Section
     with gr.Accordion("Full Message Array", open=False):
         messages_output = gr.JSON(label="Conversation Messages", value=[])
 
     # Function for generating responses with error handling
-    def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
+    def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream,
+                         enable_judge, judge_provider, judge_base_url, judge_api_key, judge_model_dd, judge_model_tb,
+                         judge_temp, criteria, scale):
         """
         Generate response from LLM API based on selected provider and parameters.
         Includes comprehensive error handling for API calls.
@@ -370,6 +552,12 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         usage = None
         error_message = ""
 
+        # Judge evaluation variables
+        judge_score = None
+        judge_confidence = None
+        judge_feedback = ""
+        judge_reasoning = ""
+
         # Determine model, API base URL, and API key using helper functions
         model = get_model(provider, model_dd, model_tb)
         api_base_url = get_api_base_url(provider, base_url)
@@ -395,7 +583,12 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                            gr.update(value=partial),
                            gr.update(value="", visible=False),
                            "",
-                           messages)
+                           messages,
+                           gr.update(value=None),
+                           gr.update(value=None),
+                           gr.update(value=""),
+                           gr.update(value=""),
+                           gr.update(visible=enable_judge))
                 full_response = partial
                 reasoning = last_reasoning
                 usage = last_usage
@@ -426,6 +619,21 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
         if full_response and not error_message:
             messages.append({"role": "assistant", "content": full_response})
 
+            # Perform judge evaluation if enabled
+            if enable_judge:
+                try:
+                    judge_model = get_model(judge_provider, judge_model_dd, judge_model_tb)
+                    judge_client = get_judge_client(judge_provider, judge_base_url, judge_api_key)
+
+                    judge_score, judge_confidence, judge_feedback, judge_reasoning = evaluate_with_judge(
+                        judge_client, judge_model, system, prompt, full_response, criteria, scale, judge_temp
+                    )
+                except Exception as e:
+                    judge_score = None
+                    judge_confidence = None
+                    judge_feedback = f"Judge evaluation failed: {str(e)}"
+                    judge_reasoning = str(e)
+
         # Format metadata for display
         metadata = format_metadata(model, provider, response_time, usage, error_message)
 
@@ -435,21 +643,33 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
                    gr.update(value=""),
                    gr.update(value=error_message, visible=True),
                    metadata,
-                   messages)
+                   messages,
+                   gr.update(value=judge_score),
+                   gr.update(value=judge_confidence),
+                   gr.update(value=judge_feedback),
+                   gr.update(value=judge_reasoning),
+                   gr.update(visible=enable_judge))
         else:
             reasoning_value = reasoning if reasoning else "No reasoning tokens included"
             yield (gr.update(value=reasoning_value),
                    gr.update(value=full_response),
                    gr.update(value="", visible=False),
                    metadata,
-                   messages)
+                   messages,
+                   gr.update(value=judge_score),
+                   gr.update(value=judge_confidence),
+                   gr.update(value=judge_feedback),
+                   gr.update(value=judge_reasoning),
+                   gr.update(visible=enable_judge))
 
     # Event handler for the generate button
     # Calls generate_response function with all input values and updates output components
     generate_btn.click(
         fn=generate_response,
-        inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming],
-        outputs=[reasoning_output, response_output, error_output, metadata, messages_output]
+        inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming,
+                enable_judge, judge_provider, judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
+                judge_temperature, judge_criteria, scoring_scale],
+        outputs=[reasoning_output, response_output, error_output, metadata, messages_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column]
     )
 
 # Main execution block

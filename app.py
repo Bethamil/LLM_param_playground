@@ -981,6 +981,7 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
 
                 # Yield with loading states for judge fields
                 yield (gr.update(value=reasoning_value),
+                       gr.update(value=retrieved_context, visible=use_rag),
                        gr.update(value=full_response),
                        gr.update(value="", visible=False),
                        metadata,

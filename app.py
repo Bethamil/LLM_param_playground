@@ -937,7 +937,14 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     with gr.Column(visible=False) as rag_column:
         with gr.Accordion("RAG Information", open=False):
             # Textbox for displaying retrieved context when RAG is enabled
-            context_output = gr.Textbox(label="Retrieved Context", lines=8, info="Documents retrieved from the knowledge base")
+            context_output = gr.Textbox(
+                label="Retrieved Context",
+                lines=15,
+                max_lines=20,
+                info="Documents retrieved from the knowledge base",
+                show_copy_button=True,
+                autoscroll=False
+            )
 
 
     # Judge Output Section

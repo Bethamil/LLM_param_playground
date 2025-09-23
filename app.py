@@ -283,14 +283,13 @@ def initialize_rag_with_api_key(provider, api_key, custom_api_key, embedding_pro
             return False, "Custom embedding provider requires an API key"
         embedding_key = embedding_api_key
     else:
-        # Use main provider API key for OpenAI embeddings
-        if provider == "OpenAI":
-            embedding_key = os.getenv("OPENAI_API_KEY") or api_key
-        elif provider == "OpenRouter":
-            embedding_key = os.getenv("OPENROUTER_API_KEY") or api_key
-        elif provider == "Custom":
-            embedding_key = custom_api_key
+        # For OpenAI embeddings, always use OpenAI API key regardless of main provider
+        if embedding_provider == "OpenAI":
+            embedding_key = os.getenv("OPENAI_API_KEY") or (api_key if provider == "OpenAI" else None)
+            if not embedding_key:
+                return False, "OpenAI API key required for OpenAI embeddings. Set OPENAI_API_KEY environment variable."
         else:
+            # This shouldn't happen, but fallback
             embedding_key = None
 
     if embedding_key:
@@ -645,7 +644,15 @@ def get_judge_client(judge_provider, judge_base_url, judge_api_key):
 
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
-with gr.Blocks(title="LLM Interactive Client") as demo:
+custom_css = """
+.large-button {
+    height: 80px !important;
+    font-size: 20px !important;
+    font-weight: bold !important;
+}
+"""
+
+with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Main title
     gr.Markdown("# LLM Interactive Client")
 
@@ -897,7 +904,8 @@ with gr.Blocks(title="LLM Interactive Client") as demo:
     )
 
     # Generate button to trigger API call
-    generate_btn = gr.Button("Generate")
+    with gr.Row():
+        generate_btn = gr.Button("Generate", variant="primary", size="lg", scale=2, elem_classes="large-button")
 
     # Output Section
     gr.Markdown("## Output Section")

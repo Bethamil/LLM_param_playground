@@ -783,7 +783,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             )
 
         with gr.Row():
-            initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)", variant="primary")
+            initialize_rag_btn = gr.Button("🚀 Initialize RAG Database (Only needed for new/changed documents)")
 
         # Check if database exists on page load and get detailed info
         initial_status = "📂 No database found - click Initialize to create one"
@@ -807,9 +807,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                 initial_status = "📁 Database folder found - enable RAG to auto-load"
 
         # RAG Status Display
-        with gr.Row():
-            rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False, lines=4, max_lines=4)
-            doc_count = gr.Textbox(label="Documents", value=initial_docs, interactive=False)
+        rag_status = gr.Textbox(label="RAG Status", value=initial_status, interactive=False, lines=4, max_lines=4)
 
         # Vector Visualization
         gr.Markdown("### Vector Visualization")
@@ -912,9 +910,9 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
 
     # RAG Output Section
     with gr.Column(visible=False) as rag_column:
-        gr.Markdown("## RAG Information")
-        # Textbox for displaying retrieved context when RAG is enabled
-        context_output = gr.Textbox(label="Retrieved Context", lines=8, info="Documents retrieved from the knowledge base")
+        with gr.Accordion("RAG Information", open=False):
+            # Textbox for displaying retrieved context when RAG is enabled
+            context_output = gr.Textbox(label="Retrieved Context", lines=8, info="Documents retrieved from the knowledge base")
 
 
     # Judge Output Section
@@ -1217,9 +1215,9 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
 
     # RAG Event Handlers
     initialize_rag_btn.click(
-        fn=initialize_or_update_rag_database,
+        fn=lambda *args: initialize_or_update_rag_database(*args)[0],  # Only return status, ignore doc_count
         inputs=[knowledge_base_path, file_pattern, provider_radio, custom_api_key, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
-        outputs=[rag_status, doc_count]
+        outputs=[rag_status]
     )
 
     viz_3d_btn.click(

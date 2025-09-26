@@ -27,6 +27,123 @@ import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
 from rag import RAGManager
 
+# Preset management
+PRESETS_FILE = "presets.json"
+
+def load_presets():
+    """Load presets from JSON file."""
+    if os.path.exists(PRESETS_FILE):
+        try:
+            with open(PRESETS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_presets(presets):
+    """Save presets to JSON file."""
+    with open(PRESETS_FILE, 'w') as f:
+        json.dump(presets, f, indent=2)
+
+def save_preset(name, settings):
+    """Save current settings as a preset."""
+    presets = load_presets()
+    presets[name] = settings
+    save_presets(presets)
+    return f"✅ Preset '{name}' saved successfully!"
+
+def load_preset(name):
+    """Load a preset and return the settings."""
+    presets = load_presets()
+    if name in presets:
+        return presets[name], f"✅ Preset '{name}' loaded successfully!"
+    return None, f"❌ Preset '{name}' not found!"
+
+def delete_preset(name):
+    """Delete a preset."""
+    presets = load_presets()
+    if name in presets:
+        del presets[name]
+        save_presets(presets)
+        return f"✅ Preset '{name}' deleted successfully!"
+    return f"❌ Preset '{name}' not found!"
+
+def get_preset_names():
+    """Get list of available preset names."""
+    presets = load_presets()
+    return list(presets.keys())
+
+def collect_current_settings(provider, model_dd, model_tb, base_url, api_key, system, temp, max_tok, top_p_val, freq_pen, pres_pen, stream,
+                           enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
+                           knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
+                           judge_base_url, judge_api_key, judge_model_dd, judge_model_tb, judge_temp, criteria, scale):
+    """Collect all current UI settings into a dictionary."""
+    return {
+        "provider": provider,
+        "model_dropdown": model_dd,
+        "model_textbox": model_tb,
+        "custom_base_url": base_url,
+        "custom_api_key": api_key,
+        "system_message": system,
+        "temperature": temp,
+        "max_tokens": max_tok,
+        "top_p": top_p_val,
+        "frequency_penalty": freq_pen,
+        "presence_penalty": pres_pen,
+        "streaming": stream,
+        "enable_rag": enable_rag,
+        "embedding_provider": embedding_provider,
+        "embedding_model": embedding_model,
+        "embedding_base_url": embedding_base_url,
+        "embedding_api_key": embedding_api_key,
+        "knowledge_base_path": knowledge_base_path,
+        "file_pattern": file_pattern,
+        "enable_judge": enable_judge,
+        "use_same_llm": use_same_llm,
+        "judge_provider": judge_provider,
+        "judge_base_url": judge_base_url,
+        "judge_api_key": judge_api_key,
+        "judge_model_dropdown": judge_model_dd,
+        "judge_model_textbox": judge_model_tb,
+        "judge_temperature": judge_temp,
+        "judge_criteria": criteria,
+        "scoring_scale": scale
+    }
+
+def apply_preset_settings(settings):
+    """Apply preset settings to all UI components."""
+    return (
+        gr.update(value=settings.get("provider", "OpenAI")),
+        gr.update(value=settings.get("model_dropdown", None)),
+        gr.update(value=settings.get("model_textbox", "")),
+        gr.update(value=settings.get("custom_base_url", "")),
+        gr.update(value=settings.get("custom_api_key", "")),
+        gr.update(value=settings.get("system_message", "")),
+        gr.update(value=settings.get("temperature", config.DEFAULT_TEMPERATURE)),
+        gr.update(value=settings.get("max_tokens", config.DEFAULT_MAX_TOKENS)),
+        gr.update(value=settings.get("top_p", config.DEFAULT_TOP_P)),
+        gr.update(value=settings.get("frequency_penalty", config.DEFAULT_FREQUENCY_PENALTY)),
+        gr.update(value=settings.get("presence_penalty", config.DEFAULT_PRESENCE_PENALTY)),
+        gr.update(value=settings.get("streaming", config.DEFAULT_STREAMING)),
+        gr.update(value=settings.get("enable_rag", config.DEFAULT_RAG_ENABLED)),
+        gr.update(value=settings.get("embedding_provider", config.DEFAULT_EMBEDDING_PROVIDER)),
+        gr.update(value=settings.get("embedding_model", config.DEFAULT_EMBEDDING_MODEL)),
+        gr.update(value=settings.get("embedding_base_url", config.DEFAULT_CUSTOM_EMBEDDING_BASE_URL)),
+        gr.update(value=settings.get("embedding_api_key", "")),
+        gr.update(value=settings.get("knowledge_base_path", config.DEFAULT_KNOWLEDGE_BASE_PATH)),
+        gr.update(value=settings.get("file_pattern", config.RAG_FILE_PATTERNS[0])),
+        gr.update(value=settings.get("enable_judge", False)),
+        gr.update(value=settings.get("use_same_llm", True)),
+        gr.update(value=settings.get("judge_provider", "OpenAI")),
+        gr.update(value=settings.get("judge_base_url", "")),
+        gr.update(value=settings.get("judge_api_key", "")),
+        gr.update(value=settings.get("judge_model_dropdown", None)),
+        gr.update(value=settings.get("judge_model_textbox", "")),
+        gr.update(value=settings.get("judge_temperature", 0.1)),
+        gr.update(value=settings.get("judge_criteria", "Evaluate the response for: accuracy, helpfulness, clarity, and relevance to the query.")),
+        gr.update(value=settings.get("scoring_scale", "1-10"))
+    )
+
 # Initialize RAG manager without specific embeddings (will be configured when needed)
 rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME)
 
@@ -664,7 +781,37 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Main title
     gr.Markdown("# LLM Interactive Client")
 
+    # Presets Section (moved to top)
+    with gr.Accordion("Configuration Presets", open=False):
+        gr.Markdown("Save and load different configuration settings for switching between setups.")
+
+        with gr.Row():
+            preset_name = gr.Textbox(
+                label="Preset Name",
+                placeholder="Enter a name for your preset",
+                info="Name for saving presets"
+            )
+            save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
+
+        with gr.Row():
+            preset_dropdown = gr.Dropdown(
+                choices=[],
+                label="Available Presets",
+                info="Select a preset to load or delete"
+            )
+            load_preset_btn = gr.Button("📂 Load Preset", variant="secondary")
+            delete_preset_btn = gr.Button("🗑️ Delete Preset", variant="secondary")
+
+        preset_status = gr.Textbox(
+            label="Preset Status",
+            value="",
+            interactive=False,
+            lines=2,
+            max_lines=2
+        )
+
     # Provider Selection Section
+    gr.Markdown("## Provider Selection")
     # Radio button to choose between OpenAI, OpenRouter, or Custom provider
     provider_radio = gr.Radio(
         choices=config.PROVIDERS,
@@ -1250,6 +1397,74 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                    gr.update(value=judge_feedback),
                    gr.update(value=judge_reasoning),
                    gr.update(visible=enable_judge))
+
+    # Preset Event Handlers
+    def save_current_preset(name, *args):
+        """Save current settings as a preset."""
+        if not name or not name.strip():
+            return "❌ Please enter a preset name!", gr.update(choices=get_preset_names())
+
+        settings = collect_current_settings(*args)
+        message = save_preset(name.strip(), settings)
+        return message, gr.update(choices=get_preset_names())
+
+    def load_selected_preset(name):
+        """Load a selected preset."""
+        if not name:
+            return "❌ Please select a preset to load!", *apply_preset_settings({})
+
+        settings, message = load_preset(name)
+        if settings:
+            return message, *apply_preset_settings(settings)
+        return message, *apply_preset_settings({})
+
+    def delete_selected_preset(name):
+        """Delete a selected preset."""
+        if not name:
+            return "❌ Please select a preset to delete!", gr.update(choices=get_preset_names())
+
+        message = delete_preset(name)
+        return message, gr.update(choices=get_preset_names())
+
+    # Function to update preset dropdown
+    def update_preset_dropdown():
+        """Update the preset dropdown with current available presets."""
+        return gr.update(choices=get_preset_names())
+
+    # Preset button event handlers
+    save_preset_btn.click(
+        fn=save_current_preset,
+        inputs=[preset_name, provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key,
+                system_message, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming,
+                enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
+                knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
+                judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
+                judge_temperature, judge_criteria, scoring_scale],
+        outputs=[preset_status, preset_dropdown]
+    )
+
+    load_preset_btn.click(
+        fn=load_selected_preset,
+        inputs=[preset_dropdown],
+        outputs=[preset_status, provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key,
+                 system_message, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming,
+                 enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
+                 knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
+                 judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
+                 judge_temperature, judge_criteria, scoring_scale]
+    )
+
+    delete_preset_btn.click(
+        fn=delete_selected_preset,
+        inputs=[preset_dropdown],
+        outputs=[preset_status, preset_dropdown]
+    )
+
+    # Update preset dropdown on page load
+    demo.load(
+        fn=update_preset_dropdown,
+        outputs=[preset_dropdown]
+    )
 
     # RAG Event Handlers
     initialize_rag_btn.click(

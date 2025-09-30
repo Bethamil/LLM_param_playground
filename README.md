@@ -32,6 +32,9 @@ LLM Param Playground bridges the gap between complex LLM APIs and end-users, mak
 - **Custom Embeddings**: Support for both OpenAI embeddings and custom embedding models (e.g., Ollama).
 - **Vector Visualization**: 3D visualization of document embeddings for knowledge base exploration.
 - **Flexible Document Processing**: Support for multiple file types and categorized knowledge organization.
+- **MCP (Model Context Protocol)**: Integrated support for connecting to MCP servers, enabling LLMs to interact with external tools and data sources.
+- **Manual Tool Testing**: Interactive interface for testing MCP tools with custom parameters before enabling automatic tool calling.
+- **Automatic Tool Calling**: Allow LLMs to automatically discover and call tools from connected MCP servers during conversations.
 
 ## Installation
 
@@ -137,6 +140,92 @@ The application includes built-in RAG functionality that allows you to create a 
 - **Organize by category** using subfolders for better document type tracking
 - **Keep documents focused** - shorter, topic-specific documents often work better than very long ones
 - **Consistent embedding models** - stick with one embedding model per knowledge base to avoid dimension mismatches
+
+## MCP (Model Context Protocol)
+
+The application includes comprehensive MCP (Model Context Protocol) support, allowing LLMs to interact with external tools and data sources through standardized servers.
+
+### What is MCP?
+
+MCP is an open protocol that standardizes how applications provide context to LLMs. It enables LLMs to securely access tools, databases, and services while maintaining a clear separation of concerns.
+
+### Setting Up MCP Servers
+
+1. **Create configuration file**: Create a `mcp-server.json` file in the project root:
+   ```json
+   {
+     "mcpServers": {
+       "filesystem": {
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/directory"]
+       },
+       "database": {
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-database", "postgresql://..."]
+       }
+     }
+   }
+   ```
+
+2. **Supported server types**:
+   - **Filesystem**: Access and manipulate files and directories
+   - **Database**: Query and interact with databases
+   - **Web**: Fetch and process web content
+   - **Custom**: Any MCP-compliant server
+
+### Using MCP Features
+
+#### Manual Tool Testing
+
+1. **Enable MCP**: Check the "Enable MCP" checkbox in the interface.
+
+2. **Connect to servers**: Click "🔌 Connect to Servers" to establish connections to all servers defined in `mcp-server.json`.
+
+3. **Test tools manually**:
+   - Select a server from the dropdown
+   - Choose a tool from the available tools
+   - View the tool's parameters and schema
+   - Enter parameters as JSON in the text box
+   - Click "▶️ Execute Tool" to test the tool
+   - View the results in the output section
+
+#### Automatic Tool Calling by LLM
+
+1. **Enable automatic tool calling**: After connecting to servers, check the "Enable Automatic Tool Calling by LLM" checkbox.
+
+2. **Chat with enhanced capabilities**: The LLM can now:
+   - Automatically discover available tools from all connected servers
+   - Decide which tools to call based on your questions
+   - Execute tools and use the results to generate responses
+   - Make multiple tool calls in sequence if needed
+
+3. **View tool call history**: All tool calls made during the conversation are displayed in the "MCP Tool Calls" section with:
+   - Tool name and server
+   - Parameters used
+   - Results returned
+
+### MCP Features
+
+- **Multi-Server Support**: Connect to multiple MCP servers simultaneously
+- **Tool Discovery**: Automatically discover and list available tools from each server
+- **Schema Inspection**: View detailed parameter schemas for each tool
+- **Interactive Testing**: Test tools manually before enabling automatic calling
+- **Conversation Integration**: Seamlessly integrate tool calling into LLM conversations
+- **Tool Call Tracking**: Monitor all tool calls made during conversations
+- **Error Handling**: Graceful handling of connection failures and tool execution errors
+
+### Example Use Cases
+
+- **File Management**: Ask the LLM to read, write, or search files using the filesystem server
+- **Data Analysis**: Query databases and analyze results with natural language
+- **Web Research**: Fetch and process web content on demand
+- **Custom Workflows**: Build custom MCP servers for domain-specific tasks
+
+### MCP Server Resources
+
+- Official MCP Servers: [https://github.com/modelcontextprotocol](https://github.com/modelcontextprotocol)
+- Documentation: [https://modelcontextprotocol.io](https://modelcontextprotocol.io)
+- Python SDK: [https://github.com/modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk)
 
 ## Goals
 

@@ -26,6 +26,7 @@ import time
 import json
 from openai import OpenAI, AuthenticationError, RateLimitError, APIError, NotFoundError, APIConnectionError
 from rag import RAGManager
+from mcp_manager import MCPManager, run_async
 
 # Preset management
 PRESETS_FILE = "presets.json"
@@ -147,6 +148,9 @@ def apply_preset_settings(settings):
 # Initialize RAG manager without specific embeddings (will be configured when needed)
 rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME)
 
+# Initialize MCP manager
+mcp_manager = MCPManager(config_file=config.MCP_CONFIG_FILE)
+
 def update_model_choices(provider):
     """
     Update the model dropdown choices based on the selected provider.
@@ -220,6 +224,109 @@ def update_judge_llm_config_visibility(enable_judge, use_same_llm):
     """
     show_config = enable_judge and not use_same_llm
     return gr.update(visible=show_config)
+
+def update_mcp_visibility(enable_mcp):
+    """
+    Show MCP configuration and output sections only when MCP is enabled.
+    """
+    return (
+        gr.update(visible=enable_mcp),  # mcp_config_section
+        gr.update(visible=enable_mcp)   # mcp_output_column
+    )
+
+def connect_to_mcp_servers():
+    """
+    Connect to all MCP servers defined in config file.
+    Returns status message and updates server dropdown.
+    """
+    success, message = run_async(mcp_manager.connect_to_servers())
+
+    if success:
+        servers = mcp_manager.get_connected_servers()
+        return message, gr.update(choices=servers, value=servers[0] if servers else None)
+    else:
+        return message, gr.update(choices=[], value=None)
+
+def disconnect_from_mcp_servers():
+    """
+    Disconnect from all MCP servers.
+    """
+    run_async(mcp_manager.disconnect_all())
+    return "🔌 Disconnected from all servers", gr.update(choices=[], value=None), gr.update(choices=[], value=None)
+
+def update_mcp_tools_dropdown(server_name):
+    """
+    Update tools dropdown based on selected server.
+    """
+    if not server_name:
+        return gr.update(choices=[], value=None), ""
+
+    tools = mcp_manager.get_tools_for_server(server_name)
+    tool_names = [tool.name for tool in tools]
+
+    if tool_names:
+        return gr.update(choices=tool_names, value=tool_names[0]), ""
+    else:
+        return gr.update(choices=[], value=None), "No tools available"
+
+def get_tool_schema(server_name, tool_name):
+    """
+    Get the schema/parameters for a selected tool.
+    """
+    if not server_name or not tool_name:
+        return "Select a server and tool to see parameters"
+
+    tool = mcp_manager.get_tool_by_name(server_name, tool_name)
+    if not tool:
+        return "Tool not found"
+
+    schema_info = []
+    schema_info.append(f"**Tool:** {tool.name}")
+    schema_info.append(f"**Description:** {tool.description or 'No description'}")
+
+    if hasattr(tool, 'inputSchema') and tool.inputSchema:
+        schema = tool.inputSchema
+        if isinstance(schema, dict):
+            schema_info.append(f"\n**Parameters Schema:**")
+            schema_info.append(f"```json\n{json.dumps(schema, indent=2)}\n```")
+
+    return "\n".join(schema_info)
+
+def execute_mcp_tool(server_name, tool_name, params_json):
+    """
+    Execute an MCP tool with given parameters.
+    """
+    if not server_name or not tool_name:
+        return "❌ Please select a server and tool"
+
+    # Parse parameters
+    try:
+        if params_json.strip():
+            params = json.loads(params_json)
+        else:
+            params = {}
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON parameters: {str(e)}"
+
+    # Execute tool
+    success, result = run_async(mcp_manager.call_tool(server_name, tool_name, params))
+
+    if success:
+        # Format result
+        if hasattr(result, 'content') and result.content:
+            content_parts = []
+            for item in result.content:
+                if hasattr(item, 'text'):
+                    content_parts.append(item.text)
+                elif hasattr(item, 'data'):
+                    content_parts.append(f"Data: {item.data}")
+            result_text = "\n".join(content_parts) if content_parts else str(result)
+        else:
+            result_text = str(result)
+
+        return f"✅ Tool executed successfully:\n\n{result_text}"
+    else:
+        return f"❌ Tool execution failed: {result}"
 
 def get_model(provider, model_dd, model_tb):
     """
@@ -767,6 +874,122 @@ def get_judge_client(judge_provider, judge_base_url, judge_api_key):
     api_key_final = get_api_key(judge_provider, judge_api_key)
     return create_client(api_base_url, api_key_final)
 
+def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream=False, max_iterations=5):
+    """
+    Handle API response with tool calling support.
+    Continues conversation loop until no more tool calls are needed.
+
+    Args:
+        client (OpenAI): The OpenAI client instance.
+        model (str): The model name.
+        messages (list): List of messages.
+        temp (float): Temperature parameter.
+        max_tok (int): Max tokens.
+        top_p_val (float): Top-p parameter.
+        freq_pen (float): Frequency penalty.
+        pres_pen (float): Presence penalty.
+        tools (list): List of tool definitions in OpenAI format.
+        stream (bool): Whether to use streaming mode.
+        max_iterations (int): Maximum number of tool call iterations.
+
+    Yields:
+        tuple: (response_content, usage, reasoning, tool_calls_made)
+    """
+    iteration = 0
+    conversation_messages = messages.copy()
+    all_tool_calls = []
+
+    while iteration < max_iterations:
+        iteration += 1
+
+        try:
+            # Make API call with tools
+            response = client.chat.completions.create(
+                model=model,
+                messages=conversation_messages,
+                temperature=temp,
+                max_completion_tokens=max_tok,
+                top_p=top_p_val,
+                frequency_penalty=freq_pen,
+                presence_penalty=pres_pen,
+                tools=tools if tools else None,
+                stream=False  # Tool calls don't work well with streaming
+            )
+        except Exception as e:
+            # If API call fails, yield error and stop
+            yield f"Error during tool calling: {str(e)}", None, "", all_tool_calls
+            break
+
+        # Extract response
+        choice = response.choices[0]
+        message = choice.message
+        usage = response.usage
+        reasoning = getattr(message, 'reasoning', None) or ""
+
+        # Add assistant message to conversation
+        conversation_messages.append({
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": message.tool_calls if hasattr(message, 'tool_calls') and message.tool_calls else None
+        })
+
+        # Check if there are tool calls
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            # Execute each tool call
+            for tool_call in message.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args_str = tool_call.function.arguments
+
+                try:
+                    tool_args = json.loads(tool_args_str)
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                # Execute the tool via MCP
+                success, result = run_async(mcp_manager.execute_tool_call(tool_name, tool_args))
+
+                # Format tool result
+                if success:
+                    if hasattr(result, 'content') and result.content:
+                        content_parts = []
+                        for item in result.content:
+                            if hasattr(item, 'text'):
+                                content_parts.append(item.text)
+                            elif hasattr(item, 'data'):
+                                content_parts.append(str(item.data))
+                        tool_result = "\n".join(content_parts) if content_parts else str(result)
+                    else:
+                        tool_result = str(result)
+                else:
+                    tool_result = f"Error: {result}"
+
+                # Add tool result to conversation
+                conversation_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result
+                })
+
+                # Track tool call
+                all_tool_calls.append({
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "result": tool_result
+                })
+
+            # Yield intermediate state (tool calls made, waiting for next response)
+            yield "", usage, reasoning, all_tool_calls
+
+        else:
+            # No more tool calls, return final response
+            final_response = message.content or ""
+            yield final_response, usage, reasoning, all_tool_calls
+            break
+
+    # If we hit max iterations, return what we have
+    if iteration >= max_iterations:
+        yield conversation_messages[-1].get("content", "Max iterations reached"), usage, reasoning, all_tool_calls
+
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
 custom_css = """
@@ -1060,6 +1283,69 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         outputs=[judge_custom_row]
     )
 
+    # MCP Configuration Section
+    gr.Markdown("## MCP (Model Context Protocol)")
+    enable_mcp = gr.Checkbox(value=config.DEFAULT_MCP_ENABLED, label="Enable MCP", info="Enable Model Context Protocol for tool calling")
+
+    # MCP configuration (visible only when MCP is enabled)
+    with gr.Column(visible=False) as mcp_config_section:
+        with gr.Row():
+            connect_mcp_btn = gr.Button("🔌 Connect to Servers", variant="primary")
+            disconnect_mcp_btn = gr.Button("🔌 Disconnect", variant="secondary")
+
+        mcp_status = gr.Textbox(
+            label="Connection Status",
+            value="Not connected",
+            interactive=False,
+            lines=3
+        )
+
+        # Manual Tool Testing Section
+        with gr.Accordion("Manual Tool Testing", open=False):
+            gr.Markdown("Test MCP tools manually by selecting a server, tool, and providing parameters.")
+
+            with gr.Row():
+                mcp_server_dropdown = gr.Dropdown(
+                    label="Select Server",
+                    choices=[],
+                    interactive=True,
+                    info="Choose an MCP server"
+                )
+                mcp_tool_dropdown = gr.Dropdown(
+                    label="Select Tool",
+                    choices=[],
+                    interactive=True,
+                    info="Choose a tool from the selected server"
+                )
+
+            mcp_tool_info = gr.Markdown(
+                value="Select a server and tool to see parameters",
+                label="Tool Information"
+            )
+
+            mcp_params = gr.Textbox(
+                label="Tool Parameters (JSON)",
+                placeholder='{"param1": "value1", "param2": "value2"}',
+                lines=5,
+                info="Enter tool parameters as JSON"
+            )
+
+            execute_tool_btn = gr.Button("▶️ Execute Tool", variant="primary")
+
+            mcp_tool_output = gr.Textbox(
+                label="Tool Output",
+                lines=10,
+                interactive=False,
+                info="Result from tool execution"
+            )
+
+        # Enable automatic tool calling by LLM
+        enable_mcp_tool_calling = gr.Checkbox(
+            value=config.DEFAULT_MCP_TOOL_CALL_ENABLED,
+            label="Enable Automatic Tool Calling by LLM",
+            info="Allow the LLM to automatically call MCP tools during conversation"
+        )
+
     # Generate button to trigger API call
     with gr.Row():
         generate_btn = gr.Button("Generate", variant="primary", size="lg", scale=2, elem_classes="large-button")
@@ -1090,6 +1376,15 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                 autoscroll=False
             )
 
+    # MCP Tool Calls Output Section
+    with gr.Column(visible=False) as mcp_output_column:
+        with gr.Accordion("MCP Tool Calls", open=True):
+            # Display tool calls made by the LLM
+            mcp_tool_calls_output = gr.JSON(
+                label="Tool Calls Made",
+                value=[],
+                show_label=True
+            )
 
     # Judge Output Section
     with gr.Column(visible=False) as judge_column:
@@ -1114,6 +1409,41 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         outputs=judge_llm_config
     )
 
+    # Event handlers for MCP
+    enable_mcp.change(
+        fn=update_mcp_visibility,
+        inputs=enable_mcp,
+        outputs=[mcp_config_section, mcp_output_column]
+    )
+
+    connect_mcp_btn.click(
+        fn=connect_to_mcp_servers,
+        outputs=[mcp_status, mcp_server_dropdown]
+    )
+
+    disconnect_mcp_btn.click(
+        fn=disconnect_from_mcp_servers,
+        outputs=[mcp_status, mcp_server_dropdown, mcp_tool_dropdown]
+    )
+
+    mcp_server_dropdown.change(
+        fn=update_mcp_tools_dropdown,
+        inputs=mcp_server_dropdown,
+        outputs=[mcp_tool_dropdown, mcp_tool_output]
+    )
+
+    mcp_tool_dropdown.change(
+        fn=get_tool_schema,
+        inputs=[mcp_server_dropdown, mcp_tool_dropdown],
+        outputs=mcp_tool_info
+    )
+
+    execute_tool_btn.click(
+        fn=execute_mcp_tool,
+        inputs=[mcp_server_dropdown, mcp_tool_dropdown, mcp_params],
+        outputs=mcp_tool_output
+    )
+
     # Event handler for RAG enable/disable
     enable_rag.change(
         fn=update_rag_visibility_and_status,
@@ -1136,7 +1466,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Function for generating responses with error handling
     def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream, use_rag, custom_api_key,
                          enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dd, judge_model_tb,
-                         judge_temp, criteria, scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key):
+                         judge_temp, criteria, scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
+                         enable_mcp, enable_mcp_tool_calling):
         """
         Generate response from LLM API based on selected provider and parameters.
         Includes comprehensive error handling for API calls, RAG functionality, and judge evaluation.
@@ -1220,18 +1551,35 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         # Record start time for response time calculation
         start_time = time.time()
 
+        # Prepare tools if MCP tool calling is enabled
+        tools = None
+        tool_calls_log = []
+        if enable_mcp and enable_mcp_tool_calling and mcp_manager.connected:
+            tools = mcp_manager.format_tools_for_openai()
+
         try:
             # Make API call using unified response handler
             last_usage = None
             last_reasoning = ""
             full_response = ""
 
-            for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
-                full_response = response_content
-                if response_usage:
-                    last_usage = response_usage
-                if response_reasoning:
-                    last_reasoning = response_reasoning
+            # Use tool calling handler if tools are available and enabled
+            if tools and enable_mcp_tool_calling:
+                for response_content, response_usage, response_reasoning, tool_calls_made in handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
+                    full_response = response_content
+                    if response_usage:
+                        last_usage = response_usage
+                    if response_reasoning:
+                        last_reasoning = response_reasoning
+                    if tool_calls_made:
+                        tool_calls_log = tool_calls_made
+            else:
+                for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
+                    full_response = response_content
+                    if response_usage:
+                        last_usage = response_usage
+                    if response_reasoning:
+                        last_reasoning = response_reasoning
 
                 # For streaming, yield each partial result
                 if stream:
@@ -1259,7 +1607,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                            gr.update(value=judge_confidence_value),
                            gr.update(value=judge_feedback_value),
                            gr.update(value=judge_reasoning_value),
-                           gr.update(visible=enable_judge))
+                           gr.update(visible=enable_judge),
+                           gr.update(value=tool_calls_log))
 
             # Set final values for downstream processing
             usage = last_usage
@@ -1282,7 +1631,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                            gr.update(value=None),
                            gr.update(value="🤖 Judge is evaluating the response..."),
                            gr.update(value="⏳ Processing evaluation criteria..."),
-                           gr.update(visible=enable_judge))
+                           gr.update(visible=enable_judge),
+                           gr.update(value=tool_calls_log))
 
         except ValueError as e:
             error_message = str(e)
@@ -1323,7 +1673,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                        gr.update(value=None),
                        gr.update(value="🤖 Judge is evaluating the response..."),
                        gr.update(value="⏳ Processing evaluation criteria..."),
-                       gr.update(visible=enable_judge))
+                       gr.update(visible=enable_judge),
+                       gr.update(value=tool_calls_log))
 
             # Perform judge evaluation if enabled
             if enable_judge:
@@ -1383,7 +1734,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                    gr.update(value=judge_confidence),
                    gr.update(value=judge_feedback),
                    gr.update(value=judge_reasoning),
-                   gr.update(visible=enable_judge))
+                   gr.update(visible=enable_judge),
+                   gr.update(value=tool_calls_log))
         else:
             reasoning_value = reasoning if reasoning else "No reasoning tokens included"
             yield (gr.update(value=reasoning_value),
@@ -1396,7 +1748,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                    gr.update(value=judge_confidence),
                    gr.update(value=judge_feedback),
                    gr.update(value=judge_reasoning),
-                   gr.update(visible=enable_judge))
+                   gr.update(visible=enable_judge),
+                   gr.update(value=tool_calls_log))
 
     # Preset Event Handlers
     def save_current_preset(name, *args):
@@ -1485,8 +1838,9 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         fn=generate_response,
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming, enable_rag, custom_api_key,
                 enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
-                judge_temperature, judge_criteria, scoring_scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key],
-        outputs=[reasoning_output, response_output, error_output, metadata, messages_output, context_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column]
+                judge_temperature, judge_criteria, scoring_scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
+                enable_mcp, enable_mcp_tool_calling],
+        outputs=[reasoning_output, response_output, error_output, metadata, messages_output, context_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column, mcp_tool_calls_output]
     )
 
 # Main execution block

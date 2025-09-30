@@ -10,3 +10,4 @@ venv.bak/
 knowledge-base
 presets.json
 vector_db*
+mcp-server.json

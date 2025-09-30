@@ -893,7 +893,7 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
         max_iterations (int): Maximum number of tool call iterations.
 
     Yields:
-        tuple: (response_content, usage, reasoning, tool_calls_made)
+        tuple: (response_content, usage, reasoning, tool_calls_made, conversation_messages)
     """
     iteration = 0
     conversation_messages = messages.copy()
@@ -917,7 +917,7 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
             )
         except Exception as e:
             # If API call fails, yield error and stop
-            yield f"Error during tool calling: {str(e)}", None, "", all_tool_calls
+            yield f"Error during tool calling: {str(e)}", None, "", all_tool_calls, conversation_messages
             break
 
         # Extract response
@@ -927,10 +927,24 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
         reasoning = getattr(message, 'reasoning', None) or ""
 
         # Add assistant message to conversation
+        # Format tool_calls for better display if they exist
+        formatted_tool_calls = None
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            formatted_tool_calls = []
+            for tc in message.tool_calls:
+                formatted_tool_calls.append({
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                })
+
         conversation_messages.append({
             "role": "assistant",
             "content": message.content or "",
-            "tool_calls": message.tool_calls if hasattr(message, 'tool_calls') and message.tool_calls else None
+            "tool_calls": formatted_tool_calls
         })
 
         # Check if there are tool calls
@@ -978,17 +992,17 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
                 })
 
             # Yield intermediate state (tool calls made, waiting for next response)
-            yield "", usage, reasoning, all_tool_calls
+            yield "", usage, reasoning, all_tool_calls, conversation_messages
 
         else:
             # No more tool calls, return final response
             final_response = message.content or ""
-            yield final_response, usage, reasoning, all_tool_calls
+            yield final_response, usage, reasoning, all_tool_calls, conversation_messages
             break
 
     # If we hit max iterations, return what we have
     if iteration >= max_iterations:
-        yield conversation_messages[-1].get("content", "Max iterations reached"), usage, reasoning, all_tool_calls
+        yield conversation_messages[-1].get("content", "Max iterations reached"), usage, reasoning, all_tool_calls, conversation_messages
 
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
@@ -1562,10 +1576,11 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             last_usage = None
             last_reasoning = ""
             full_response = ""
+            conversation_messages_with_tools = None
 
             # Use tool calling handler if tools are available and enabled
             if tools and enable_mcp_tool_calling:
-                for response_content, response_usage, response_reasoning, tool_calls_made in handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
+                for response_content, response_usage, response_reasoning, tool_calls_made, conv_messages in handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
                     full_response = response_content
                     if response_usage:
                         last_usage = response_usage
@@ -1573,6 +1588,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                         last_reasoning = response_reasoning
                     if tool_calls_made:
                         tool_calls_log = tool_calls_made
+                    if conv_messages:
+                        conversation_messages_with_tools = conv_messages
             else:
                 for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
                     full_response = response_content
@@ -1655,7 +1672,12 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
 
         # Add assistant response to messages array if successful
         if full_response and not error_message:
-            messages.append({"role": "assistant", "content": full_response})
+            # If tool calling was used, use the full conversation messages which includes tool calls
+            if conversation_messages_with_tools:
+                messages = conversation_messages_with_tools
+            else:
+                # Otherwise just append the simple assistant response
+                messages.append({"role": "assistant", "content": full_response})
 
             # Show loading states for judge evaluation if enabled
             if enable_judge:

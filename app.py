@@ -1220,6 +1220,69 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             viz_3d_btn = gr.Button("Generate 3D Plot")
             viz_3d_plot = gr.Plot(label="3D Vector Visualization")
 
+    # MCP Configuration Section
+    gr.Markdown("## MCP (Model Context Protocol)")
+    enable_mcp = gr.Checkbox(value=config.DEFAULT_MCP_ENABLED, label="Enable MCP", info="Enable Model Context Protocol for tool calling")
+
+    # MCP configuration (visible only when MCP is enabled)
+    with gr.Column(visible=False) as mcp_config_section:
+        with gr.Row():
+            connect_mcp_btn = gr.Button("🔌 Connect to Servers", variant="primary")
+            disconnect_mcp_btn = gr.Button("🔌 Disconnect", variant="secondary")
+
+        mcp_status = gr.Textbox(
+            label="Connection Status",
+            value="Not connected",
+            interactive=False,
+            lines=3
+        )
+
+        # Manual Tool Testing Section
+        with gr.Accordion("Manual Tool Testing", open=False):
+            gr.Markdown("Test MCP tools manually by selecting a server, tool, and providing parameters.")
+
+            with gr.Row():
+                mcp_server_dropdown = gr.Dropdown(
+                    label="Select Server",
+                    choices=[],
+                    interactive=True,
+                    info="Choose an MCP server"
+                )
+                mcp_tool_dropdown = gr.Dropdown(
+                    label="Select Tool",
+                    choices=[],
+                    interactive=True,
+                    info="Choose a tool from the selected server"
+                )
+
+            mcp_tool_info = gr.Markdown(
+                value="Select a server and tool to see parameters",
+                label="Tool Information"
+            )
+
+            mcp_params = gr.Textbox(
+                label="Tool Parameters (JSON)",
+                placeholder='{"param1": "value1", "param2": "value2"}',
+                lines=5,
+                info="Enter tool parameters as JSON"
+            )
+
+            execute_tool_btn = gr.Button("▶️ Execute Tool", variant="primary")
+
+            mcp_tool_output = gr.Textbox(
+                label="Tool Output",
+                lines=10,
+                interactive=False,
+                info="Result from tool execution"
+            )
+
+        # Enable automatic tool calling by LLM
+        enable_mcp_tool_calling = gr.Checkbox(
+            value=config.DEFAULT_MCP_TOOL_CALL_ENABLED,
+            label="Enable Automatic Tool Calling by LLM",
+            info="Allow the LLM to automatically call MCP tools during conversation"
+        )
+
     # Judge Configuration Section
     gr.Markdown("## LLM Judge Configuration")
     enable_judge = gr.Checkbox(value=False, label="Enable LLM Judge", info="Use another LLM to evaluate and score the response")
@@ -1296,69 +1359,6 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         inputs=judge_provider,
         outputs=[judge_custom_row]
     )
-
-    # MCP Configuration Section
-    gr.Markdown("## MCP (Model Context Protocol)")
-    enable_mcp = gr.Checkbox(value=config.DEFAULT_MCP_ENABLED, label="Enable MCP", info="Enable Model Context Protocol for tool calling")
-
-    # MCP configuration (visible only when MCP is enabled)
-    with gr.Column(visible=False) as mcp_config_section:
-        with gr.Row():
-            connect_mcp_btn = gr.Button("🔌 Connect to Servers", variant="primary")
-            disconnect_mcp_btn = gr.Button("🔌 Disconnect", variant="secondary")
-
-        mcp_status = gr.Textbox(
-            label="Connection Status",
-            value="Not connected",
-            interactive=False,
-            lines=3
-        )
-
-        # Manual Tool Testing Section
-        with gr.Accordion("Manual Tool Testing", open=False):
-            gr.Markdown("Test MCP tools manually by selecting a server, tool, and providing parameters.")
-
-            with gr.Row():
-                mcp_server_dropdown = gr.Dropdown(
-                    label="Select Server",
-                    choices=[],
-                    interactive=True,
-                    info="Choose an MCP server"
-                )
-                mcp_tool_dropdown = gr.Dropdown(
-                    label="Select Tool",
-                    choices=[],
-                    interactive=True,
-                    info="Choose a tool from the selected server"
-                )
-
-            mcp_tool_info = gr.Markdown(
-                value="Select a server and tool to see parameters",
-                label="Tool Information"
-            )
-
-            mcp_params = gr.Textbox(
-                label="Tool Parameters (JSON)",
-                placeholder='{"param1": "value1", "param2": "value2"}',
-                lines=5,
-                info="Enter tool parameters as JSON"
-            )
-
-            execute_tool_btn = gr.Button("▶️ Execute Tool", variant="primary")
-
-            mcp_tool_output = gr.Textbox(
-                label="Tool Output",
-                lines=10,
-                interactive=False,
-                info="Result from tool execution"
-            )
-
-        # Enable automatic tool calling by LLM
-        enable_mcp_tool_calling = gr.Checkbox(
-            value=config.DEFAULT_MCP_TOOL_CALL_ENABLED,
-            label="Enable Automatic Tool Calling by LLM",
-            info="Allow the LLM to automatically call MCP tools during conversation"
-        )
 
     # Generate button to trigger API call
     with gr.Row():

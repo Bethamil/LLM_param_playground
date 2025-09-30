@@ -898,12 +898,14 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
     iteration = 0
     conversation_messages = messages.copy()
     all_tool_calls = []
+    use_streaming = stream  # Start with requested streaming mode
 
     while iteration < max_iterations:
         iteration += 1
 
         try:
             # Make API call with tools
+            # Use streaming on first iteration if requested, then non-streaming for tool call iterations
             response = client.chat.completions.create(
                 model=model,
                 messages=conversation_messages,
@@ -913,18 +915,100 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
                 frequency_penalty=freq_pen,
                 presence_penalty=pres_pen,
                 tools=tools if tools else None,
-                stream=False  # Tool calls don't work well with streaming
+                stream=use_streaming
             )
         except Exception as e:
             # If API call fails, yield error and stop
             yield f"Error during tool calling: {str(e)}", None, "", all_tool_calls, conversation_messages
             break
 
-        # Extract response
-        choice = response.choices[0]
-        message = choice.message
-        usage = response.usage
-        reasoning = getattr(message, 'reasoning', None) or ""
+        # Handle streaming vs non-streaming response
+        if use_streaming:
+            # Streaming mode: collect the response
+            full_response = ""
+            full_reasoning = ""
+            usage = None
+            tool_calls_data = []
+            
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                
+                # Collect content
+                if delta.content:
+                    full_response += delta.content
+                    # Yield progressive updates for streaming
+                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
+                
+                # Collect reasoning
+                if hasattr(delta, 'reasoning') and delta.reasoning:
+                    full_reasoning += delta.reasoning
+                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
+                
+                # Collect tool calls
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        # Ensure we have enough slots in tool_calls_data
+                        while len(tool_calls_data) <= tc_delta.index:
+                            tool_calls_data.append({
+                                'id': None,
+                                'type': 'function',
+                                'function': {'name': '', 'arguments': ''}
+                            })
+                        
+                        # Update the tool call data
+                        if tc_delta.id:
+                            tool_calls_data[tc_delta.index]['id'] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_data[tc_delta.index]['function']['name'] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_data[tc_delta.index]['function']['arguments'] += tc_delta.function.arguments
+                
+                # Collect usage
+                if chunk.usage:
+                    usage = chunk.usage
+                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
+            
+            # Create a message-like object from streamed data
+            class StreamedMessage:
+                def __init__(self, content, tool_calls, reasoning):
+                    self.content = content
+                    self.tool_calls = tool_calls if tool_calls else None
+                    self.reasoning = reasoning
+            
+            # Convert tool_calls_data to proper format
+            formatted_tool_calls_obj = None
+            if tool_calls_data:
+                class ToolCall:
+                    def __init__(self, id, type, function):
+                        self.id = id
+                        self.type = type
+                        self.function = function
+                
+                class Function:
+                    def __init__(self, name, arguments):
+                        self.name = name
+                        self.arguments = arguments
+                
+                formatted_tool_calls_obj = []
+                for tc_data in tool_calls_data:
+                    formatted_tool_calls_obj.append(
+                        ToolCall(
+                            tc_data['id'],
+                            tc_data['type'],
+                            Function(tc_data['function']['name'], tc_data['function']['arguments'])
+                        )
+                    )
+            
+            message = StreamedMessage(full_response, formatted_tool_calls_obj, full_reasoning)
+            reasoning = full_reasoning
+            
+        else:
+            # Non-streaming mode: extract response normally
+            choice = response.choices[0]
+            message = choice.message
+            usage = response.usage
+            reasoning = getattr(message, 'reasoning', None) or ""
 
         # Add assistant message to conversation
         # Format tool_calls for better display if they exist
@@ -949,6 +1033,9 @@ def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p
 
         # Check if there are tool calls
         if hasattr(message, 'tool_calls') and message.tool_calls:
+            # Switch to non-streaming for subsequent iterations after tool calls
+            use_streaming = False
+            
             # Execute each tool call
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
@@ -1590,6 +1677,35 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                         tool_calls_log = tool_calls_made
                     if conv_messages:
                         conversation_messages_with_tools = conv_messages
+                    
+                    # For streaming, yield progressive updates
+                    if stream and response_content:
+                        reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
+                        
+                        # Show loading states for judge fields during streaming if judge is enabled
+                        if enable_judge:
+                            judge_score_value = None
+                            judge_confidence_value = None
+                            judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
+                            judge_reasoning_value = "📝 Waiting for main response..."
+                        else:
+                            judge_score_value = None
+                            judge_confidence_value = None
+                            judge_feedback_value = ""
+                            judge_reasoning_value = ""
+                        
+                        yield (gr.update(value=reasoning_value),
+                               gr.update(value=full_response),
+                               gr.update(value="", visible=False),
+                               "",
+                               messages,
+                               gr.update(value=retrieved_context),
+                               gr.update(value=judge_score_value),
+                               gr.update(value=judge_confidence_value),
+                               gr.update(value=judge_feedback_value),
+                               gr.update(value=judge_reasoning_value),
+                               gr.update(visible=enable_judge),
+                               gr.update(value=tool_calls_log))
             else:
                 for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
                     full_response = response_content
@@ -1598,34 +1714,34 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                     if response_reasoning:
                         last_reasoning = response_reasoning
 
-                # For streaming, yield each partial result
-                if stream:
-                    reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
+                    # For streaming, yield each partial result
+                    if stream:
+                        reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
 
-                    # Show loading states for judge fields during streaming if judge is enabled
-                    if enable_judge:
-                        judge_score_value = None  # Number fields must remain None during loading
-                        judge_confidence_value = None
-                        judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
-                        judge_reasoning_value = "📝 Waiting for main response..."
-                    else:
-                        judge_score_value = None
-                        judge_confidence_value = None
-                        judge_feedback_value = ""
-                        judge_reasoning_value = ""
+                        # Show loading states for judge fields during streaming if judge is enabled
+                        if enable_judge:
+                            judge_score_value = None  # Number fields must remain None during loading
+                            judge_confidence_value = None
+                            judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
+                            judge_reasoning_value = "📝 Waiting for main response..."
+                        else:
+                            judge_score_value = None
+                            judge_confidence_value = None
+                            judge_feedback_value = ""
+                            judge_reasoning_value = ""
 
-                    yield (gr.update(value=reasoning_value),
-                           gr.update(value=full_response),
-                           gr.update(value="", visible=False),
-                           "",
-                           messages,
-                           gr.update(value=retrieved_context),
-                           gr.update(value=judge_score_value),
-                           gr.update(value=judge_confidence_value),
-                           gr.update(value=judge_feedback_value),
-                           gr.update(value=judge_reasoning_value),
-                           gr.update(visible=enable_judge),
-                           gr.update(value=tool_calls_log))
+                        yield (gr.update(value=reasoning_value),
+                               gr.update(value=full_response),
+                               gr.update(value="", visible=False),
+                               "",
+                               messages,
+                               gr.update(value=retrieved_context),
+                               gr.update(value=judge_score_value),
+                               gr.update(value=judge_confidence_value),
+                               gr.update(value=judge_feedback_value),
+                               gr.update(value=judge_reasoning_value),
+                               gr.update(visible=enable_judge),
+                               gr.update(value=tool_calls_log))
 
             # Set final values for downstream processing
             usage = last_usage

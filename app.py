@@ -1260,11 +1260,11 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                 label="Tool Information"
             )
 
-            mcp_params = gr.Textbox(
+            mcp_params = gr.Code(
                 label="Tool Parameters (JSON)",
-                placeholder='{"param1": "value1", "param2": "value2"}',
-                lines=5,
-                info="Enter tool parameters as JSON"
+                value='{\n  "param1": "value1",\n  "param2": "value2"\n}',
+                language="json",
+                lines=8
             )
 
             execute_tool_btn = gr.Button("▶️ Execute Tool", variant="primary")

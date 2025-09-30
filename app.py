@@ -417,10 +417,16 @@ def prepare_messages(system, prompt):
         {"role": "user", "content": prompt}
     ]
 
-def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream=False):
+def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools=None, stream=False, max_iterations=5):
     """
-    Handle API response with unified streaming and non-streaming logic.
-
+    Unified API response handler with streaming and tool calling support.
+    
+    This function handles:
+    - Streaming responses (yields progressive updates)
+    - Non-streaming responses
+    - Tool calls (executes and continues conversation)
+    - Multiple tool call iterations
+    
     Args:
         client (OpenAI): The OpenAI client instance.
         model (str): The model name.
@@ -430,45 +436,192 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
         top_p_val (float): Top-p parameter.
         freq_pen (float): Frequency penalty.
         pres_pen (float): Presence penalty.
+        tools (list): Optional list of tool definitions.
         stream (bool): Whether to use streaming mode.
-
+        max_iterations (int): Maximum tool call iterations.
+    
     Yields:
-        tuple: (response_content, usage, reasoning)
-        - For streaming: yields partial results as they arrive
-        - For non-streaming: yields final result once
+        tuple: (response_content, usage, reasoning, tool_calls_made, conversation_messages)
     """
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temp,
-        max_completion_tokens=max_tok,
-        top_p=top_p_val,
-        frequency_penalty=freq_pen,
-        presence_penalty=pres_pen,
-        stream=stream
-    )
-
-    if stream:
-        # Streaming mode: yield partial results as they arrive
-        full_response = ""
-        full_reasoning = ""
-        usage = None
-        for chunk in response:
-            if chunk.choices[0].delta.content:
-                full_response += chunk.choices[0].delta.content
-                yield full_response, usage, full_reasoning
-            if hasattr(chunk.choices[0].delta, 'reasoning') and chunk.choices[0].delta.reasoning:
-                full_reasoning += chunk.choices[0].delta.reasoning
-                yield full_response, usage, full_reasoning
-            if chunk.usage:
-                usage = chunk.usage
-                yield full_response, usage, full_reasoning
-    else:
-        # Non-streaming mode: yield final result once
-        full_response = response.choices[0].message.content
-        usage = response.usage
-        reasoning = getattr(response.choices[0].message, 'reasoning', None) or ""
-        yield full_response, usage, reasoning
+    iteration = 0
+    conversation_messages = messages.copy()
+    all_tool_calls = []
+    final_response = ""
+    final_usage = None
+    final_reasoning = ""
+    
+    while iteration < max_iterations:
+        iteration += 1
+        
+        try:
+            # Make API call - always respect the stream parameter
+            response = client.chat.completions.create(
+                model=model,
+                messages=conversation_messages,
+                temperature=temp,
+                max_completion_tokens=max_tok,
+                top_p=top_p_val,
+                frequency_penalty=freq_pen,
+                presence_penalty=pres_pen,
+                tools=tools if tools else None,
+                stream=stream
+            )
+        except Exception as e:
+            yield f"Error: {str(e)}", None, "", all_tool_calls, conversation_messages
+            return
+        
+        # Process response based on streaming mode
+        if stream:
+            # Streaming: collect response progressively
+            content = ""
+            reasoning = ""
+            usage = None
+            tool_calls_data = []
+            
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                
+                # Collect content and yield progressive updates
+                if delta.content:
+                    content += delta.content
+                    yield content, usage, reasoning, all_tool_calls, conversation_messages
+                
+                # Collect reasoning
+                if hasattr(delta, 'reasoning') and delta.reasoning:
+                    reasoning += delta.reasoning
+                    yield content, usage, reasoning, all_tool_calls, conversation_messages
+                
+                # Collect tool calls
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        # Ensure we have enough slots
+                        while len(tool_calls_data) <= tc_delta.index:
+                            tool_calls_data.append({
+                                'id': None,
+                                'type': 'function',
+                                'function': {'name': '', 'arguments': ''}
+                            })
+                        
+                        # Update tool call data
+                        if tc_delta.id:
+                            tool_calls_data[tc_delta.index]['id'] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_data[tc_delta.index]['function']['name'] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_data[tc_delta.index]['function']['arguments'] += tc_delta.function.arguments
+                
+                # Collect usage
+                if chunk.usage:
+                    usage = chunk.usage
+                    yield content, usage, reasoning, all_tool_calls, conversation_messages
+            
+            # Create message object from streamed data
+            message_content = content
+            message_reasoning = reasoning
+            message_usage = usage
+            
+            # Convert tool_calls_data to proper format
+            message_tool_calls = []
+            if tool_calls_data:
+                for tc_data in tool_calls_data:
+                    message_tool_calls.append({
+                        'id': tc_data['id'],
+                        'type': tc_data['type'],
+                        'function': {
+                            'name': tc_data['function']['name'],
+                            'arguments': tc_data['function']['arguments']
+                        }
+                    })
+        else:
+            # Non-streaming: extract response
+            choice = response.choices[0]
+            message = choice.message
+            message_content = message.content or ""
+            message_reasoning = getattr(message, 'reasoning', None) or ""
+            message_usage = response.usage
+            
+            # Extract tool calls
+            message_tool_calls = []
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tc in message.tool_calls:
+                    message_tool_calls.append({
+                        'id': tc.id,
+                        'type': tc.type,
+                        'function': {
+                            'name': tc.function.name,
+                            'arguments': tc.function.arguments
+                        }
+                    })
+        
+        # Store final values
+        final_response = message_content
+        final_reasoning = message_reasoning
+        final_usage = message_usage
+        
+        # Add assistant message to conversation
+        conversation_messages.append({
+            "role": "assistant",
+            "content": message_content,
+            "tool_calls": message_tool_calls if message_tool_calls else None
+        })
+        
+        # Check if there are tool calls to execute
+        if message_tool_calls and tools:
+            # Execute each tool call
+            for tool_call in message_tool_calls:
+                tool_name = tool_call['function']['name']
+                tool_args_str = tool_call['function']['arguments']
+                
+                try:
+                    tool_args = json.loads(tool_args_str)
+                except json.JSONDecodeError:
+                    tool_args = {}
+                
+                # Execute the tool via MCP
+                success, result = run_async(mcp_manager.execute_tool_call(tool_name, tool_args))
+                
+                # Format tool result
+                if success:
+                    if hasattr(result, 'content') and result.content:
+                        content_parts = []
+                        for item in result.content:
+                            if hasattr(item, 'text'):
+                                content_parts.append(item.text)
+                            elif hasattr(item, 'data'):
+                                content_parts.append(str(item.data))
+                        tool_result = "\n".join(content_parts) if content_parts else str(result)
+                    else:
+                        tool_result = str(result)
+                else:
+                    tool_result = f"Error: {result}"
+                
+                # Add tool result to conversation
+                conversation_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call['id'],
+                    "content": tool_result
+                })
+                
+                # Track tool call
+                all_tool_calls.append({
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "result": tool_result
+                })
+            
+            # Yield state after tool execution (keep content visible)
+            yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
+            
+            # Continue loop to get next response after tool calls
+            continue
+        else:
+            # No tool calls - we're done
+            yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
+            return
+    
+    # Max iterations reached
+    yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
 
 def format_metadata(model, provider, response_time, usage, error_message, judge_enabled=False, judge_data=None):
     """
@@ -873,223 +1026,6 @@ def get_judge_client(judge_provider, judge_base_url, judge_api_key):
     api_base_url = get_api_base_url(judge_provider, judge_base_url)
     api_key_final = get_api_key(judge_provider, judge_api_key)
     return create_client(api_base_url, api_key_final)
-
-def handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream=False, max_iterations=5):
-    """
-    Handle API response with tool calling support.
-    Continues conversation loop until no more tool calls are needed.
-
-    Args:
-        client (OpenAI): The OpenAI client instance.
-        model (str): The model name.
-        messages (list): List of messages.
-        temp (float): Temperature parameter.
-        max_tok (int): Max tokens.
-        top_p_val (float): Top-p parameter.
-        freq_pen (float): Frequency penalty.
-        pres_pen (float): Presence penalty.
-        tools (list): List of tool definitions in OpenAI format.
-        stream (bool): Whether to use streaming mode.
-        max_iterations (int): Maximum number of tool call iterations.
-
-    Yields:
-        tuple: (response_content, usage, reasoning, tool_calls_made, conversation_messages)
-    """
-    iteration = 0
-    conversation_messages = messages.copy()
-    all_tool_calls = []
-    use_streaming = stream  # Start with requested streaming mode
-
-    while iteration < max_iterations:
-        iteration += 1
-
-        try:
-            # Make API call with tools
-            # Use streaming on first iteration if requested, then non-streaming for tool call iterations
-            response = client.chat.completions.create(
-                model=model,
-                messages=conversation_messages,
-                temperature=temp,
-                max_completion_tokens=max_tok,
-                top_p=top_p_val,
-                frequency_penalty=freq_pen,
-                presence_penalty=pres_pen,
-                tools=tools if tools else None,
-                stream=use_streaming
-            )
-        except Exception as e:
-            # If API call fails, yield error and stop
-            yield f"Error during tool calling: {str(e)}", None, "", all_tool_calls, conversation_messages
-            break
-
-        # Handle streaming vs non-streaming response
-        if use_streaming:
-            # Streaming mode: collect the response
-            full_response = ""
-            full_reasoning = ""
-            usage = None
-            tool_calls_data = []
-            
-            for chunk in response:
-                delta = chunk.choices[0].delta
-                
-                # Collect content
-                if delta.content:
-                    full_response += delta.content
-                    # Yield progressive updates for streaming
-                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
-                
-                # Collect reasoning
-                if hasattr(delta, 'reasoning') and delta.reasoning:
-                    full_reasoning += delta.reasoning
-                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
-                
-                # Collect tool calls
-                if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        # Ensure we have enough slots in tool_calls_data
-                        while len(tool_calls_data) <= tc_delta.index:
-                            tool_calls_data.append({
-                                'id': None,
-                                'type': 'function',
-                                'function': {'name': '', 'arguments': ''}
-                            })
-                        
-                        # Update the tool call data
-                        if tc_delta.id:
-                            tool_calls_data[tc_delta.index]['id'] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_calls_data[tc_delta.index]['function']['name'] = tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_calls_data[tc_delta.index]['function']['arguments'] += tc_delta.function.arguments
-                
-                # Collect usage
-                if chunk.usage:
-                    usage = chunk.usage
-                    yield full_response, usage, full_reasoning, all_tool_calls, conversation_messages
-            
-            # Create a message-like object from streamed data
-            class StreamedMessage:
-                def __init__(self, content, tool_calls, reasoning):
-                    self.content = content
-                    self.tool_calls = tool_calls if tool_calls else None
-                    self.reasoning = reasoning
-            
-            # Convert tool_calls_data to proper format
-            formatted_tool_calls_obj = None
-            if tool_calls_data:
-                class ToolCall:
-                    def __init__(self, id, type, function):
-                        self.id = id
-                        self.type = type
-                        self.function = function
-                
-                class Function:
-                    def __init__(self, name, arguments):
-                        self.name = name
-                        self.arguments = arguments
-                
-                formatted_tool_calls_obj = []
-                for tc_data in tool_calls_data:
-                    formatted_tool_calls_obj.append(
-                        ToolCall(
-                            tc_data['id'],
-                            tc_data['type'],
-                            Function(tc_data['function']['name'], tc_data['function']['arguments'])
-                        )
-                    )
-            
-            message = StreamedMessage(full_response, formatted_tool_calls_obj, full_reasoning)
-            reasoning = full_reasoning
-            
-        else:
-            # Non-streaming mode: extract response normally
-            choice = response.choices[0]
-            message = choice.message
-            usage = response.usage
-            reasoning = getattr(message, 'reasoning', None) or ""
-
-        # Add assistant message to conversation
-        # Format tool_calls for better display if they exist
-        formatted_tool_calls = None
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            formatted_tool_calls = []
-            for tc in message.tool_calls:
-                formatted_tool_calls.append({
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                })
-
-        conversation_messages.append({
-            "role": "assistant",
-            "content": message.content or "",
-            "tool_calls": formatted_tool_calls
-        })
-
-        # Check if there are tool calls
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            # Switch to non-streaming for subsequent iterations after tool calls
-            use_streaming = False
-            
-            # Execute each tool call
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args_str = tool_call.function.arguments
-
-                try:
-                    tool_args = json.loads(tool_args_str)
-                except json.JSONDecodeError:
-                    tool_args = {}
-
-                # Execute the tool via MCP
-                success, result = run_async(mcp_manager.execute_tool_call(tool_name, tool_args))
-
-                # Format tool result
-                if success:
-                    if hasattr(result, 'content') and result.content:
-                        content_parts = []
-                        for item in result.content:
-                            if hasattr(item, 'text'):
-                                content_parts.append(item.text)
-                            elif hasattr(item, 'data'):
-                                content_parts.append(str(item.data))
-                        tool_result = "\n".join(content_parts) if content_parts else str(result)
-                    else:
-                        tool_result = str(result)
-                else:
-                    tool_result = f"Error: {result}"
-
-                # Add tool result to conversation
-                conversation_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result
-                })
-
-                # Track tool call
-                all_tool_calls.append({
-                    "tool": tool_name,
-                    "arguments": tool_args,
-                    "result": tool_result
-                })
-
-            # Yield intermediate state (tool calls made, waiting for next response)
-            yield "", usage, reasoning, all_tool_calls, conversation_messages
-
-        else:
-            # No more tool calls, return final response
-            final_response = message.content or ""
-            yield final_response, usage, reasoning, all_tool_calls, conversation_messages
-            break
-
-    # If we hit max iterations, return what we have
-    if iteration >= max_iterations:
-        yield conversation_messages[-1].get("content", "Max iterations reached"), usage, reasoning, all_tool_calls, conversation_messages
 
 # Gradio interface definition
 # Creates the web UI for the LLM client using Gradio Blocks
@@ -1665,83 +1601,46 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             full_response = ""
             conversation_messages_with_tools = None
 
-            # Use tool calling handler if tools are available and enabled
-            if tools and enable_mcp_tool_calling:
-                for response_content, response_usage, response_reasoning, tool_calls_made, conv_messages in handle_api_response_with_tools(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
-                    full_response = response_content
-                    if response_usage:
-                        last_usage = response_usage
-                    if response_reasoning:
-                        last_reasoning = response_reasoning
-                    if tool_calls_made:
-                        tool_calls_log = tool_calls_made
-                    if conv_messages:
-                        conversation_messages_with_tools = conv_messages
+            # Use unified handler for all cases (with or without tools, streaming or not)
+            for response_content, response_usage, response_reasoning, tool_calls_made, conv_messages in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
+                full_response = response_content
+                if response_usage:
+                    last_usage = response_usage
+                if response_reasoning:
+                    last_reasoning = response_reasoning
+                if tool_calls_made:
+                    tool_calls_log = tool_calls_made
+                if conv_messages:
+                    conversation_messages_with_tools = conv_messages
+                
+                # For streaming, yield progressive updates
+                if stream:
+                    reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
                     
-                    # For streaming, yield progressive updates
-                    if stream and response_content:
-                        reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
-                        
-                        # Show loading states for judge fields during streaming if judge is enabled
-                        if enable_judge:
-                            judge_score_value = None
-                            judge_confidence_value = None
-                            judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
-                            judge_reasoning_value = "📝 Waiting for main response..."
-                        else:
-                            judge_score_value = None
-                            judge_confidence_value = None
-                            judge_feedback_value = ""
-                            judge_reasoning_value = ""
-                        
-                        yield (gr.update(value=reasoning_value),
-                               gr.update(value=full_response),
-                               gr.update(value="", visible=False),
-                               "",
-                               messages,
-                               gr.update(value=retrieved_context),
-                               gr.update(value=judge_score_value),
-                               gr.update(value=judge_confidence_value),
-                               gr.update(value=judge_feedback_value),
-                               gr.update(value=judge_reasoning_value),
-                               gr.update(visible=enable_judge),
-                               gr.update(value=tool_calls_log))
-            else:
-                for response_content, response_usage, response_reasoning in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, stream):
-                    full_response = response_content
-                    if response_usage:
-                        last_usage = response_usage
-                    if response_reasoning:
-                        last_reasoning = response_reasoning
-
-                    # For streaming, yield each partial result
-                    if stream:
-                        reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
-
-                        # Show loading states for judge fields during streaming if judge is enabled
-                        if enable_judge:
-                            judge_score_value = None  # Number fields must remain None during loading
-                            judge_confidence_value = None
-                            judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
-                            judge_reasoning_value = "📝 Waiting for main response..."
-                        else:
-                            judge_score_value = None
-                            judge_confidence_value = None
-                            judge_feedback_value = ""
-                            judge_reasoning_value = ""
-
-                        yield (gr.update(value=reasoning_value),
-                               gr.update(value=full_response),
-                               gr.update(value="", visible=False),
-                               "",
-                               messages,
-                               gr.update(value=retrieved_context),
-                               gr.update(value=judge_score_value),
-                               gr.update(value=judge_confidence_value),
-                               gr.update(value=judge_feedback_value),
-                               gr.update(value=judge_reasoning_value),
-                               gr.update(visible=enable_judge),
-                               gr.update(value=tool_calls_log))
+                    # Show loading states for judge fields during streaming if judge is enabled
+                    if enable_judge:
+                        judge_score_value = None
+                        judge_confidence_value = None
+                        judge_feedback_value = "⌛ Judge will evaluate once response is complete..."
+                        judge_reasoning_value = "📝 Waiting for main response..."
+                    else:
+                        judge_score_value = None
+                        judge_confidence_value = None
+                        judge_feedback_value = ""
+                        judge_reasoning_value = ""
+                    
+                    yield (gr.update(value=reasoning_value),
+                           gr.update(value=full_response),
+                           gr.update(value="", visible=False),
+                           "",
+                           messages,
+                           gr.update(value=retrieved_context),
+                           gr.update(value=judge_score_value),
+                           gr.update(value=judge_confidence_value),
+                           gr.update(value=judge_feedback_value),
+                           gr.update(value=judge_reasoning_value),
+                           gr.update(visible=enable_judge),
+                           gr.update(value=tool_calls_log))
 
             # Set final values for downstream processing
             usage = last_usage

@@ -151,18 +151,23 @@ rag_manager = RAGManager(db_name=config.DEFAULT_VECTOR_DB_NAME)
 # Initialize MCP manager
 mcp_manager = MCPManager(config_file=config.MCP_CONFIG_FILE)
 
-def update_model_choices(provider):
+def update_model_choices(provider, current_model_value=None):
     """
     Update the model dropdown choices based on the selected provider.
     For Custom provider, hide dropdown and show text input.
     Uses dynamic model fetching with fallback to hardcoded lists.
+    Preserves the current model value if it's valid for the new provider.
     """
     if provider == "OpenAI":
         models = config.get_models_for_provider("OpenAI")
-        return gr.update(choices=models, value=models[0] if models else None, visible=True), gr.update(visible=False)
+        # Keep current value if it's in the new models list, otherwise use first model
+        new_value = current_model_value if current_model_value in models else (models[0] if models else None)
+        return gr.update(choices=models, value=new_value, visible=True), gr.update(visible=False)
     elif provider == "OpenRouter":
         models = config.get_models_for_provider("OpenRouter")
-        return gr.update(choices=models, value=models[0] if models else None, visible=True), gr.update(visible=False)
+        # Keep current value if it's in the new models list, otherwise use first model
+        new_value = current_model_value if current_model_value in models else (models[0] if models else None)
+        return gr.update(choices=models, value=new_value, visible=True), gr.update(visible=False)
     elif provider == "Custom":
         return gr.update(visible=False), gr.update(visible=True)
     else:
@@ -420,13 +425,13 @@ def prepare_messages(system, prompt):
 def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools=None, stream=False, max_iterations=5):
     """
     Unified API response handler with streaming and tool calling support.
-    
+
     This function handles:
     - Streaming responses (yields progressive updates)
     - Non-streaming responses
     - Tool calls (executes and continues conversation)
     - Multiple tool call iterations
-    
+
     Args:
         client (OpenAI): The OpenAI client instance.
         model (str): The model name.
@@ -439,7 +444,7 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
         tools (list): Optional list of tool definitions.
         stream (bool): Whether to use streaming mode.
         max_iterations (int): Maximum tool call iterations.
-    
+
     Yields:
         tuple: (response_content, usage, reasoning, tool_calls_made, conversation_messages)
     """
@@ -449,10 +454,10 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
     final_response = ""
     final_usage = None
     final_reasoning = ""
-    
+
     while iteration < max_iterations:
         iteration += 1
-        
+
         try:
             # Make API call - always respect the stream parameter
             response = client.chat.completions.create(
@@ -469,7 +474,7 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
         except Exception as e:
             yield f"Error: {str(e)}", None, "", all_tool_calls, conversation_messages
             return
-        
+
         # Process response based on streaming mode
         if stream:
             # Streaming: collect response progressively
@@ -477,20 +482,20 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
             reasoning = ""
             usage = None
             tool_calls_data = []
-            
+
             for chunk in response:
                 delta = chunk.choices[0].delta
-                
+
                 # Collect content and yield progressive updates
                 if delta.content:
                     content += delta.content
                     yield content, usage, reasoning, all_tool_calls, conversation_messages
-                
+
                 # Collect reasoning
                 if hasattr(delta, 'reasoning') and delta.reasoning:
                     reasoning += delta.reasoning
                     yield content, usage, reasoning, all_tool_calls, conversation_messages
-                
+
                 # Collect tool calls
                 if hasattr(delta, 'tool_calls') and delta.tool_calls:
                     for tc_delta in delta.tool_calls:
@@ -501,7 +506,7 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
                                 'type': 'function',
                                 'function': {'name': '', 'arguments': ''}
                             })
-                        
+
                         # Update tool call data
                         if tc_delta.id:
                             tool_calls_data[tc_delta.index]['id'] = tc_delta.id
@@ -510,17 +515,17 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
                                 tool_calls_data[tc_delta.index]['function']['name'] = tc_delta.function.name
                             if tc_delta.function.arguments:
                                 tool_calls_data[tc_delta.index]['function']['arguments'] += tc_delta.function.arguments
-                
+
                 # Collect usage
                 if chunk.usage:
                     usage = chunk.usage
                     yield content, usage, reasoning, all_tool_calls, conversation_messages
-            
+
             # Create message object from streamed data
             message_content = content
             message_reasoning = reasoning
             message_usage = usage
-            
+
             # Convert tool_calls_data to proper format
             message_tool_calls = []
             if tool_calls_data:
@@ -540,7 +545,7 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
             message_content = message.content or ""
             message_reasoning = getattr(message, 'reasoning', None) or ""
             message_usage = response.usage
-            
+
             # Extract tool calls
             message_tool_calls = []
             if hasattr(message, 'tool_calls') and message.tool_calls:
@@ -553,34 +558,34 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
                             'arguments': tc.function.arguments
                         }
                     })
-        
+
         # Store final values
         final_response = message_content
         final_reasoning = message_reasoning
         final_usage = message_usage
-        
+
         # Add assistant message to conversation
         conversation_messages.append({
             "role": "assistant",
             "content": message_content,
             "tool_calls": message_tool_calls if message_tool_calls else None
         })
-        
+
         # Check if there are tool calls to execute
         if message_tool_calls and tools:
             # Execute each tool call
             for tool_call in message_tool_calls:
                 tool_name = tool_call['function']['name']
                 tool_args_str = tool_call['function']['arguments']
-                
+
                 try:
                     tool_args = json.loads(tool_args_str)
                 except json.JSONDecodeError:
                     tool_args = {}
-                
+
                 # Execute the tool via MCP
                 success, result = run_async(mcp_manager.execute_tool_call(tool_name, tool_args))
-                
+
                 # Format tool result
                 if success:
                     if hasattr(result, 'content') and result.content:
@@ -595,31 +600,31 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
                         tool_result = str(result)
                 else:
                     tool_result = f"Error: {result}"
-                
+
                 # Add tool result to conversation
                 conversation_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call['id'],
                     "content": tool_result
                 })
-                
+
                 # Track tool call
                 all_tool_calls.append({
                     "tool": tool_name,
                     "arguments": tool_args,
                     "result": tool_result
                 })
-            
+
             # Yield state after tool execution (keep content visible)
             yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
-            
+
             # Continue loop to get next response after tool calls
             continue
         else:
             # No tool calls - we're done
             yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
             return
-    
+
     # Max iterations reached
     yield final_response, final_usage, final_reasoning, all_tool_calls, conversation_messages
 
@@ -1103,7 +1108,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             choices=initial_models,
             value=initial_models[0] if initial_models else None,
             label="Select Model",
-            visible=True
+            visible=True,
+            allow_custom_value=True
         )
         model_textbox = gr.Textbox(
             label="Custom Model Name",
@@ -1116,7 +1122,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Update model choices and custom fields visibility based on provider
     provider_radio.change(
         fn=update_model_choices,
-        inputs=provider_radio,
+        inputs=[provider_radio, model_dropdown],
         outputs=[model_dropdown, model_textbox]
     )
     provider_radio.change(
@@ -1345,7 +1351,8 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                     choices=config.get_models_for_provider("OpenAI"),
                     value=config.get_models_for_provider("OpenAI")[0] if config.get_models_for_provider("OpenAI") else None,
                     label="Judge Model",
-                    visible=True
+                    visible=True,
+                    allow_custom_value=True
                 )
                 judge_model_textbox = gr.Textbox(
                     label="Custom Judge Model",
@@ -1375,7 +1382,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     # Event handlers for judge provider selection
     judge_provider.change(
         fn=update_model_choices,
-        inputs=judge_provider,
+        inputs=[judge_provider, judge_model_dropdown],
         outputs=[judge_model_dropdown, judge_model_textbox]
     )
     judge_provider.change(
@@ -1613,11 +1620,11 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                     tool_calls_log = tool_calls_made
                 if conv_messages:
                     conversation_messages_with_tools = conv_messages
-                
+
                 # For streaming, yield progressive updates
                 if stream:
                     reasoning_value = last_reasoning if last_reasoning else "No reasoning tokens included"
-                    
+
                     # Show loading states for judge fields during streaming if judge is enabled
                     if enable_judge:
                         judge_score_value = None
@@ -1629,7 +1636,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                         judge_confidence_value = None
                         judge_feedback_value = ""
                         judge_reasoning_value = ""
-                    
+
                     yield (gr.update(value=reasoning_value),
                            gr.update(value=full_response),
                            gr.update(value="", visible=False),

@@ -484,6 +484,8 @@ def handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_
             tool_calls_data = []
 
             for chunk in response:
+                if not chunk.choices or len(chunk.choices) == 0:
+                    continue
                 delta = chunk.choices[0].delta
 
                 # Collect content and yield progressive updates

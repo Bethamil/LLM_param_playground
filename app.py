@@ -945,30 +945,45 @@ def format_metadata(model, provider, response_time, usage, error_message, judge_
 
     return metadata_str
 
-def evaluate_with_judge(client, judge_model, system, prompt, response, criteria, scale, temperature):
+def evaluate_with_judge(client, judge_model, system, prompt, response, criteria, scale, temperature, tool_calls=None):
     """
     Evaluate a response using an LLM judge.
 
     Args:
         client (OpenAI): The judge client instance.
         judge_model (str): The judge model name.
-        system (str): Original system message.
+        system (str): System message (may include RAG context if RAG was used).
         prompt (str): Original user prompt.
         response (str): The response to evaluate.
         criteria (str): Evaluation criteria.
         scale (str): Scoring scale ("1-5", "1-10", "1-100").
         temperature (float): Judge temperature.
+        tool_calls (list): Optional list of tool calls made during generation.
 
     Returns:
         tuple: (score, confidence, feedback, reasoning, usage)
     """
     max_score = int(scale.split('-')[1])
 
+    # Build tool calls information if available
+    tool_calls_info = ""
+    if tool_calls and len(tool_calls) > 0:
+        tool_calls_info = "\n\n**MCP Tool Calls Made:**\n"
+        for i, tool_call in enumerate(tool_calls, 1):
+            tool_name = tool_call.get("tool", "Unknown")
+            tool_args = tool_call.get("arguments", {})
+            tool_result = tool_call.get("result", "No result")
+            # Truncate long results for readability
+            if isinstance(tool_result, str) and len(tool_result) > 500:
+                tool_result = tool_result[:500] + "... (truncated)"
+            tool_calls_info += f"{i}. **Tool:** {tool_name}\n"
+            tool_calls_info += f"   **Arguments:** {json.dumps(tool_args, indent=2)}\n"
+            tool_calls_info += f"   **Result:** {tool_result}\n\n"
+
     judge_prompt = f"""You are an expert judge evaluating AI responses. Please evaluate the following response based on these criteria: {criteria}
 
 Original Query: {prompt}
-Original System: {system}
-
+Original System: {system}{tool_calls_info}
 Response to evaluate: {response}
 
 Please provide your evaluation in the following JSON format:
@@ -979,7 +994,7 @@ Please provide your evaluation in the following JSON format:
     "reasoning": "<your reasoning process for the score>"
 }}
 
-Be strict but fair in your evaluation. Consider accuracy, helpfulness, clarity, and relevance."""
+Be strict but fair in your evaluation. Consider accuracy, helpfulness, clarity, and relevance.{" If tool calls were made, consider whether the response properly integrated the tool results." if tool_calls_info else ""}"""
 
     try:
         judge_response = client.chat.completions.create(
@@ -1737,8 +1752,13 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                         judge_client = get_judge_client(judge_provider, judge_base_url, judge_api_key)
                         judge_provider_name = judge_provider
 
+                    # Extract the actual system message that was used (includes RAG context if RAG was enabled)
+                    actual_system_message = system
+                    if messages and len(messages) > 0 and messages[0].get("role") == "system":
+                        actual_system_message = messages[0]["content"]
+
                     judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_usage = evaluate_with_judge(
-                        judge_client, judge_model, system, prompt, full_response, criteria, scale, judge_temp
+                        judge_client, judge_model, actual_system_message, prompt, full_response, criteria, scale, judge_temp, tool_calls_log
                     )
 
                     judge_evaluation_time = time.time() - judge_start_time

@@ -77,7 +77,8 @@ def get_preset_names():
 def collect_current_settings(provider, model_dd, model_tb, base_url, api_key, system, temp, max_tok, top_p_val, freq_pen, pres_pen, stream,
                            enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
                            knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
-                           judge_base_url, judge_api_key, judge_model_dd, judge_model_tb, judge_temp, criteria, scale):
+                           judge_base_url, judge_api_key, judge_model_dd, judge_model_tb, judge_temp, criteria, scale,
+                           enable_mcp, enable_mcp_tool_calling, max_tool_iterations):
     """Collect all current UI settings into a dictionary."""
     return {
         "provider": provider,
@@ -108,7 +109,10 @@ def collect_current_settings(provider, model_dd, model_tb, base_url, api_key, sy
         "judge_model_textbox": judge_model_tb,
         "judge_temperature": judge_temp,
         "judge_criteria": criteria,
-        "scoring_scale": scale
+        "scoring_scale": scale,
+        "enable_mcp": enable_mcp,
+        "enable_mcp_tool_calling": enable_mcp_tool_calling,
+        "max_tool_iterations": max_tool_iterations
     }
 
 def apply_preset_settings(settings):
@@ -142,7 +146,10 @@ def apply_preset_settings(settings):
         gr.update(value=settings.get("judge_model_textbox", "")),
         gr.update(value=settings.get("judge_temperature", 0.1)),
         gr.update(value=settings.get("judge_criteria", "Evaluate the response for: accuracy, helpfulness, clarity, and relevance to the query.")),
-        gr.update(value=settings.get("scoring_scale", "1-10"))
+        gr.update(value=settings.get("scoring_scale", "1-10")),
+        gr.update(value=settings.get("enable_mcp", config.DEFAULT_MCP_ENABLED)),
+        gr.update(value=settings.get("enable_mcp_tool_calling", config.DEFAULT_MCP_TOOL_CALL_ENABLED)),
+        gr.update(value=settings.get("max_tool_iterations", config.DEFAULT_MAX_TOOL_ITERATIONS))
     )
 
 # Initialize RAG manager without specific embeddings (will be configured when needed)
@@ -238,6 +245,12 @@ def update_mcp_visibility(enable_mcp):
         gr.update(visible=enable_mcp),  # mcp_config_section
         gr.update(visible=enable_mcp)   # mcp_output_column
     )
+
+def update_max_tool_iterations_visibility(enable_mcp_tool_calling):
+    """
+    Show max tool iterations slider only when automatic tool calling is enabled.
+    """
+    return gr.update(visible=enable_mcp_tool_calling)
 
 def connect_to_mcp_servers():
     """
@@ -1329,6 +1342,17 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             label="Enable Automatic Tool Calling by LLM",
             info="Allow the LLM to automatically call MCP tools during conversation"
         )
+        
+        # Max tool call iterations (only visible when automatic tool calling is enabled)
+        max_tool_iterations = gr.Slider(
+            minimum=1,
+            maximum=20,
+            value=config.DEFAULT_MAX_TOOL_ITERATIONS,
+            step=1,
+            label="Max Tool Call Iterations",
+            info="Maximum number of tool call iterations allowed (default: 5)",
+            visible=config.DEFAULT_MCP_TOOL_CALL_ENABLED
+        )
 
     # Judge Configuration Section
     gr.Markdown("## LLM Judge Configuration")
@@ -1478,6 +1502,12 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         outputs=[mcp_config_section, mcp_output_column]
     )
 
+    enable_mcp_tool_calling.change(
+        fn=update_max_tool_iterations_visibility,
+        inputs=enable_mcp_tool_calling,
+        outputs=[max_tool_iterations]
+    )
+
     connect_mcp_btn.click(
         fn=connect_to_mcp_servers,
         outputs=[mcp_status, mcp_server_dropdown]
@@ -1529,7 +1559,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
     def generate_response(provider, model_dd, model_tb, base_url, api_key, system, prompt, temp, max_tok, top_p_val, freq_pen, pres_pen, stream, use_rag, custom_api_key,
                          enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dd, judge_model_tb,
                          judge_temp, criteria, scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
-                         enable_mcp, enable_mcp_tool_calling):
+                         enable_mcp, enable_mcp_tool_calling, max_tool_iterations):
         """
         Generate response from LLM API based on selected provider and parameters.
         Includes comprehensive error handling for API calls, RAG functionality, and judge evaluation.
@@ -1627,7 +1657,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
             conversation_messages_with_tools = None
 
             # Use unified handler for all cases (with or without tools, streaming or not)
-            for response_content, response_usage, response_reasoning, tool_calls_made, conv_messages in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream):
+            for response_content, response_usage, response_reasoning, tool_calls_made, conv_messages in handle_api_response(client, model, messages, temp, max_tok, top_p_val, freq_pen, pres_pen, tools, stream, max_tool_iterations):
                 full_response = response_content
                 if response_usage:
                     last_usage = response_usage
@@ -1859,7 +1889,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                 enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
                 knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
                 judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
-                judge_temperature, judge_criteria, scoring_scale],
+                judge_temperature, judge_criteria, scoring_scale, enable_mcp, enable_mcp_tool_calling, max_tool_iterations],
         outputs=[preset_status, preset_dropdown]
     )
 
@@ -1871,7 +1901,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
                  enable_rag, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
                  knowledge_base_path, file_pattern, enable_judge, use_same_llm, judge_provider,
                  judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
-                 judge_temperature, judge_criteria, scoring_scale]
+                 judge_temperature, judge_criteria, scoring_scale, enable_mcp, enable_mcp_tool_calling, max_tool_iterations]
     )
 
     delete_preset_btn.click(
@@ -1906,7 +1936,7 @@ with gr.Blocks(title="LLM Interactive Client", css=custom_css) as demo:
         inputs=[provider_radio, model_dropdown, model_textbox, custom_base_url, custom_api_key, system_message, user_prompt, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, streaming, enable_rag, custom_api_key,
                 enable_judge, use_same_llm, judge_provider, judge_base_url, judge_api_key, judge_model_dropdown, judge_model_textbox,
                 judge_temperature, judge_criteria, scoring_scale, embedding_provider, embedding_model, embedding_base_url, embedding_api_key,
-                enable_mcp, enable_mcp_tool_calling],
+                enable_mcp, enable_mcp_tool_calling, max_tool_iterations],
         outputs=[reasoning_output, response_output, error_output, metadata, messages_output, context_output, judge_score, judge_confidence, judge_feedback, judge_reasoning, judge_column, mcp_tool_calls_output]
     )
 

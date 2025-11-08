@@ -58,6 +58,7 @@ DEFAULT_CUSTOM_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_MCP_ENABLED = False
 MCP_CONFIG_FILE = "mcp-server.json"
 DEFAULT_MCP_TOOL_CALL_ENABLED = False
+DEFAULT_MAX_TOOL_ITERATIONS = 5
 
 # API base URLs
 OPENAI_BASE_URL = "https://api.openai.com/v1"

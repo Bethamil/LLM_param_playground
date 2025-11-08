@@ -987,8 +987,8 @@ def evaluate_with_judge(client, judge_model, system, prompt, response, criteria,
             tool_args = tool_call.get("arguments", {})
             tool_result = tool_call.get("result", "No result")
             # Truncate long results for readability
-            if isinstance(tool_result, str) and len(tool_result) > 500:
-                tool_result = tool_result[:500] + "... (truncated)"
+            if isinstance(tool_result, str) and len(tool_result) > 10000:
+                tool_result = tool_result[:10000] + "... (truncated)"
             tool_calls_info += f"{i}. **Tool:** {tool_name}\n"
             tool_calls_info += f"   **Arguments:** {json.dumps(tool_args, indent=2)}\n"
             tool_calls_info += f"   **Result:** {tool_result}\n\n"
